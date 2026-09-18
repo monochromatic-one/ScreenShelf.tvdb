@@ -592,19 +592,46 @@ function isEnglishText(value){
   const text=typeof value==='string'?value.trim():'';
   return !!text && !hasNonLatinLetters(text) && /[A-Za-z0-9]/.test(text);
 }
-function pickEnglishTitleFromSearch(r){
-  // TVDB search may return Hindi, Tamil, Japanese or another local title in r.name;
-  // prefer an English translation and only fall back to an ASCII slug.
-  if(r.translations){
-    if(isEnglishText(r.translations.eng)) return r.translations.eng.trim();
-    if(isEnglishText(r.translations.en)) return r.translations.en.trim();
-    // translations could be object with many langs — match only en / eng (not "fr-en" or "french")
-    for(const [lang,val] of Object.entries(r.translations)){
-      if(isEnglishText(val) && /^en(g)?$/i.test(String(lang).trim())) return val.trim();
+function isEnglishLanguageCode(value){
+  const lang=String(value||'').trim().toLowerCase().replace('_','-');
+  return lang==='en'||lang==='eng'||lang==='english'||lang.startsWith('en-');
+}
+function englishTranslationFrom(value){
+  if(typeof value==='string') return isEnglishText(value)?value.trim():'';
+  if(Array.isArray(value)){
+    for(const row of value){
+      if(!row||typeof row!=='object') continue;
+      const lang=row.language||row.lang||row.languageCode||row.iso6391||row.iso639_1;
+      if(!isEnglishLanguageCode(lang)) continue;
+      const text=row.name||row.title||row.value||row.translation||row.text;
+      if(isEnglishText(text)) return text.trim();
+    }
+    return '';
+  }
+  if(value&&typeof value==='object'){
+    for(const key of ['eng','en','English','english']){
+      const candidate=value[key];
+      if(isEnglishText(candidate)) return candidate.trim();
+      const nested=englishTranslationFrom(candidate);
+      if(nested) return nested;
+    }
+    for(const key of ['nameTranslations','translations','names']){
+      const nested=englishTranslationFrom(value[key]);
+      if(nested) return nested;
     }
   }
-  if(isEnglishText(r.name)) return r.name.trim();
-  if(isEnglishText(r.extendedTitle)) return r.extendedTitle.trim();
+  return '';
+}
+function pickEnglishTitleFromSearch(r){
+  // TVDB search may return Hindi, Tamil, Japanese or another local title in r.name.
+  // Search responses use several translation field shapes across API versions.
+  for(const field of [r.translations,r.name_translated,r.nameTranslated,r.nameTranslations]){
+    const translated=englishTranslationFrom(field);
+    if(translated) return translated;
+  }
+  const primaryLanguage=r.primary_language||r.primaryLanguage||r.language||'';
+  if(isEnglishText(r.name)&&(!primaryLanguage||isEnglishLanguageCode(primaryLanguage))) return r.name.trim();
+  if(isEnglishText(r.extendedTitle)&&(!primaryLanguage||isEnglishLanguageCode(primaryLanguage))) return r.extendedTitle.trim();
   if(typeof r.slug==='string' && r.slug.trim()){
     // Title-case slug but keep small words lowercase (e.g. "Attack on Titan" not "Attack On Titan")
     const stop = new Set(['a','an','and','as','at','but','by','for','in','nor','of','on','or','the','to','with','vs','vs.','via']);
@@ -617,22 +644,25 @@ function pickEnglishTitleFromSearch(r){
     if(isEnglishText(slugTitle)) return slugTitle;
   }
   const fallback=(r.name || r.extendedTitle || '').trim();
-  return isEnglishText(fallback)?fallback:'';
+  return isEnglishText(fallback)&&(!primaryLanguage||isEnglishLanguageCode(primaryLanguage))?fallback:'';
 }
 function pickEnglishNameFromExtended(tv){
-  if(isEnglishText(tv.name)) return tv.name.trim();
-  // Try nameTranslations
-  if(tv.translations && Array.isArray(tv.translations.nameTranslations)){
-    const en = tv.translations.nameTranslations.find(t=> t.language==='eng' && isEnglishText(t.name));
-    if(en) return en.name.trim();
+  // Prefer an explicit English translation before the API's default name;
+  // the default can be German, Spanish or another original-language title.
+  for(const field of [tv.nameTranslations,tv.translations?.nameTranslations,tv.translations?.name,tv.name_translated,tv.nameTranslated]){
+    const translated=englishTranslationFrom(field);
+    if(translated) return translated;
   }
   if(Array.isArray(tv.aliases)){
     const enAlias = tv.aliases.find(a=> {
       const n = a.name || a.alias;
-      return isEnglishText(n) && (a.language==='eng' || a.language==='en' || !a.language);
+      const lang=a.language||a.lang||'';
+      return isEnglishText(n) && (!lang||isEnglishLanguageCode(lang));
     });
     if(enAlias) return (enAlias.name || enAlias.alias).trim();
   }
+  const originalLanguage=tv.originalLanguage||tv.original_language||tv.primaryLanguage||tv.primary_language||'';
+  if(isEnglishText(tv.name)&&(!originalLanguage||isEnglishLanguageCode(originalLanguage))) return tv.name.trim();
   if(typeof tv.slug==='string' && tv.slug.trim()){
     const stop = new Set(['a','an','and','as','at','but','by','for','in','nor','of','on','or','the','to','with','vs','vs.','via']);
     const words = tv.slug.replace(/-/g,' ').split(/\s+/).filter(Boolean);
@@ -644,7 +674,7 @@ function pickEnglishNameFromExtended(tv){
     if(isEnglishText(slugTitle)) return slugTitle;
   }
   const fallback=(tv.name || '').trim();
-  return isEnglishText(fallback)?fallback:'';
+  return isEnglishText(fallback)&&(!originalLanguage||isEnglishLanguageCode(originalLanguage))?fallback:'';
 }
 function pickEnglishOverviewFromExtended(tv){
   const direct=typeof tv.overview==='string'?tv.overview.trim():'';
@@ -1528,11 +1558,26 @@ async function fetchTvdbRelatedSeries(tv, currentId,{fresh=false}={}){
   }
   return groups;
 }
+async function fetchEnglishSeriesTitle(tvdbId){
+  const id=normalizeTvdbId(tvdbId);
+  if(id==null) return '';
+  try{
+    const json=await tvdbFetch('/series/'+id+'/translations/eng',{});
+    const data=json.data||{};
+    for(const value of [data.name,data.title,data.translation]){
+      if(isEnglishText(value)) return value.trim();
+    }
+  }catch(error){ console.warn('English TVDB title translation failed for',id,error); }
+  return '';
+}
 async function getTvDetails(tvdbId,{fast=false,fresh=false}={}){
   const tv = await fetchTvdbSeriesExtended(tvdbId,{fresh});
   if(!tv || !tv.id) throw new Error('TVDB returned invalid data.');
-  // Pick English title (avoid Japanese)
-  const englishName = pickEnglishNameFromExtended(tv);
+  // Pick English title (avoid local-language defaults). If the extended record
+  // only exposes the default language, ask TVDB's explicit English endpoint.
+  let englishName = pickEnglishNameFromExtended(tv);
+  if(!englishName) englishName=await fetchEnglishSeriesTitle(tvdbId);
+  if(!englishName) englishName='TVDB series '+tvdbId;
   // genres
   const genres = Array.isArray(tv.genres)? tv.genres.map(g=> typeof g==='string'? g: g.name).filter(Boolean):[];
   const overview = pickEnglishOverviewFromExtended(tv);
@@ -1651,7 +1696,8 @@ async function ensureEnglishLibraryTitle(item){
   if(!item||isEnglishText(item.title)||!hasApiKey()) return;
   try{
     const tv=await fetchTvdbSeriesExtended(item.tvdbId);
-    const english=pickEnglishNameFromExtended(tv);
+    let english=pickEnglishNameFromExtended(tv);
+    if(!english) english=await fetchEnglishSeriesTitle(item.tvdbId);
     if(!isEnglishText(english)||english===item.title) return;
     item.title=english;
     await saveItem(item);
