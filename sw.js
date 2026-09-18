@@ -1,5 +1,5 @@
 /* ScreenShelf — Service Worker */
-const CACHE_NAME = 'screenshelf-v7';
+const CACHE_NAME = 'screenshelf-v9';
 const CORE_ASSETS = [
   './',
   './index.html',
@@ -37,7 +37,7 @@ self.addEventListener('fetch', (event) => {
   // For navigation requests (HTML) — network-first, fallback to cache
   if (req.mode === 'navigate' || (req.headers.get('accept') || '').includes('text/html')) {
     event.respondWith(
-      fetch(req)
+      fetch(req, { cache: 'no-store' })
         .then((res) => {
           // Update cache with fresh index.html
           const copy = res.clone();
