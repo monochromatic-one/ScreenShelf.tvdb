@@ -1641,7 +1641,14 @@ async function openPreview(tvdbId){
     const tv=await getTvDetails(safe);
     const preview=normalizeLibraryItem(tv, state.activeTab==='anime'?'anime':'show');
     if(!preview) throw new Error('TVDB returned invalid data.');
-    preview.tmdbMeta=preview.tvdbMeta;
+    if(hasTmdbApiKey()){
+      try{
+        const result=await getCachedTmdbRating(preview.tvdbId);
+        const rating=result.rating;
+        preview.tvdbMeta={...preview.tvdbMeta, score:null, tmdbVoteAverage:rating?rating.voteAverage:null, tmdbVoteCount:rating?rating.voteCount:null, tmdbRatingCheckedAt:result.checkedAt};
+        preview.tmdbMeta=preview.tvdbMeta;
+      }catch(e){ console.warn('TMDB preview rating failed for',preview.title,e); }
+    }
     state.previewTvdb=preview;
   }catch(err){ showToast(err.message||'Could not load details.'); state.view='search'; state.previewMode=false; render(); return; }
   state.detailLoading=false; render();
