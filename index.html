@@ -579,76 +579,92 @@ async function idbDelete(store,key){
 
 /* ---------- Helpers: Japanese detection & English picking ---------- */
 const CJK_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9faf\uac00-\ud7af]/;
+const LETTER_RE = /\p{L}/u;
+const LATIN_SCRIPT_RE = /\p{Script=Latin}/u;
 function hasJapanese(text){ return typeof text==='string' && CJK_RE.test(text); }
+function hasNonLatinLetters(text){
+  for(const char of String(text||'')){
+    if(LETTER_RE.test(char) && !LATIN_SCRIPT_RE.test(char)) return true;
+  }
+  return false;
+}
+function isEnglishText(value){
+  const text=typeof value==='string'?value.trim():'';
+  return !!text && !hasNonLatinLetters(text) && /[A-Za-z0-9]/.test(text);
+}
 function pickEnglishTitleFromSearch(r){
-  // TVDB search may return Japanese in r.name; prefer English translation
+  // TVDB search may return Hindi, Tamil, Japanese or another local title in r.name;
+  // prefer an English translation and only fall back to an ASCII slug.
   if(r.translations){
-    if(typeof r.translations.eng==='string' && r.translations.eng.trim() && !hasJapanese(r.translations.eng)) return r.translations.eng.trim();
-    if(typeof r.translations.en==='string' && r.translations.en.trim() && !hasJapanese(r.translations.en)) return r.translations.en.trim();
+    if(isEnglishText(r.translations.eng)) return r.translations.eng.trim();
+    if(isEnglishText(r.translations.en)) return r.translations.en.trim();
     // translations could be object with many langs — match only en / eng (not "fr-en" or "french")
     for(const [lang,val] of Object.entries(r.translations)){
-      if(typeof val==='string' && val.trim() && !hasJapanese(val) && /^en(g)?$/i.test(String(lang).trim())) return val.trim();
+      if(isEnglishText(val) && /^en(g)?$/i.test(String(lang).trim())) return val.trim();
     }
   }
-  if(typeof r.name==='string' && r.name.trim() && !hasJapanese(r.name)) return r.name.trim();
-  if(typeof r.extendedTitle==='string' && r.extendedTitle.trim() && !hasJapanese(r.extendedTitle)) return r.extendedTitle.trim();
+  if(isEnglishText(r.name)) return r.name.trim();
+  if(isEnglishText(r.extendedTitle)) return r.extendedTitle.trim();
   if(typeof r.slug==='string' && r.slug.trim()){
     // Title-case slug but keep small words lowercase (e.g. "Attack on Titan" not "Attack On Titan")
     const stop = new Set(['a','an','and','as','at','but','by','for','in','nor','of','on','or','the','to','with','vs','vs.','via']);
     const words = r.slug.replace(/-/g,' ').split(/\s+/).filter(Boolean);
-    return words.map((w,i)=> {
+    const slugTitle=words.map((w,i)=> {
       const lw = w.toLowerCase();
       if(i!==0 && stop.has(lw)) return lw;
       return lw.charAt(0).toUpperCase()+lw.slice(1);
     }).join(' ');
+    if(isEnglishText(slugTitle)) return slugTitle;
   }
-  // Fallback: use whatever name we have (even Japanese) - better than empty
-  return (r.name || r.extendedTitle || '').trim();
+  const fallback=(r.name || r.extendedTitle || '').trim();
+  return isEnglishText(fallback)?fallback:'';
 }
 function pickEnglishNameFromExtended(tv){
-  if(typeof tv.name==='string' && tv.name.trim() && !hasJapanese(tv.name)) return tv.name.trim();
+  if(isEnglishText(tv.name)) return tv.name.trim();
   // Try nameTranslations
   if(tv.translations && Array.isArray(tv.translations.nameTranslations)){
-    const en = tv.translations.nameTranslations.find(t=> t.language==='eng' && typeof t.name==='string' && t.name.trim() && !hasJapanese(t.name));
+    const en = tv.translations.nameTranslations.find(t=> t.language==='eng' && isEnglishText(t.name));
     if(en) return en.name.trim();
   }
   if(Array.isArray(tv.aliases)){
     const enAlias = tv.aliases.find(a=> {
       const n = a.name || a.alias;
-      return typeof n==='string' && n.trim() && !hasJapanese(n) && (a.language==='eng' || a.language==='en' || !a.language);
+      return isEnglishText(n) && (a.language==='eng' || a.language==='en' || !a.language);
     });
     if(enAlias) return (enAlias.name || enAlias.alias).trim();
   }
   if(typeof tv.slug==='string' && tv.slug.trim()){
     const stop = new Set(['a','an','and','as','at','but','by','for','in','nor','of','on','or','the','to','with','vs','vs.','via']);
     const words = tv.slug.replace(/-/g,' ').split(/\s+/).filter(Boolean);
-    return words.map((w,i)=> {
+    const slugTitle=words.map((w,i)=> {
       const lw = w.toLowerCase();
       if(i!==0 && stop.has(lw)) return lw;
       return lw.charAt(0).toUpperCase()+lw.slice(1);
     }).join(' ');
+    if(isEnglishText(slugTitle)) return slugTitle;
   }
-  return (tv.name || '').trim();
+  const fallback=(tv.name || '').trim();
+  return isEnglishText(fallback)?fallback:'';
 }
 function pickEnglishOverviewFromExtended(tv){
   const direct=typeof tv.overview==='string'?tv.overview.trim():'';
-  if(direct && !hasJapanese(direct)) return direct;
+  if(isEnglishText(direct)) return direct;
   const readTranslation=(value)=>{
-    if(typeof value==='string') return value.trim()&&!hasJapanese(value)?value.trim():'';
+    if(typeof value==='string') return isEnglishText(value)?value.trim():'';
     if(Array.isArray(value)){
       for(const row of value){
         if(!row||typeof row!=='object') continue;
         const lang=String(row.language||row.lang||'').trim();
         if(!/^en(g)?$/i.test(lang)) continue;
         const text=row.overview||row.description||row.value||row.name;
-        if(typeof text==='string'&&text.trim()&&!hasJapanese(text)) return text.trim();
+        if(isEnglishText(text)) return text.trim();
       }
       return '';
     }
     if(value&&typeof value==='object'){
       for(const key of ['eng','en']){
         const text=value[key];
-        if(typeof text==='string'&&text.trim()&&!hasJapanese(text)) return text.trim();
+        if(isEnglishText(text)) return text.trim();
       }
     }
     return '';
@@ -657,7 +673,7 @@ function pickEnglishOverviewFromExtended(tv){
   return translated||'';
 }
 function seasonDisplayName(s, fallbackNumber){
-  if(typeof s.name==='string' && s.name.trim() && !hasJapanese(s.name)) return s.name.trim();
+  if(isEnglishText(s.name)) return s.name.trim();
   return 'Season '+fallbackNumber;
 }
 const seasonNameCache = new Map();
@@ -676,7 +692,7 @@ async function fetchEnglishSeasonName(s){
   try{
     const json=await tvdbFetch('/seasons/'+seasonId+'/translations/eng',{});
     const candidate=json.data?.name;
-    if(typeof candidate==='string' && candidate.trim() && !hasJapanese(candidate) && !GENERIC_SEASON_NAME_RE.test(candidate.trim())) name=candidate.trim();
+    if(isEnglishText(candidate) && !GENERIC_SEASON_NAME_RE.test(candidate.trim())) name=candidate.trim();
   }catch(e){ console.warn('Season name lookup failed for',seasonId,e); }
   seasonNameCache.set(seasonId,name);
   return name;
@@ -1426,7 +1442,7 @@ async function searchTv(query){
     const aliases = Array.isArray(r.aliases)? r.aliases.map(a=> typeof a==='string'?a:a?.name).filter(Boolean):[];
     const searchScore = Number(r.score);
     let overview = '';
-    if(r.overview && !hasJapanese(r.overview)) overview = r.overview;
+    if(isEnglishText(r.overview)) overview = r.overview;
     else if(r.overviewTranslations && r.overviewTranslations.eng) overview = r.overviewTranslations.eng;
     return { id: numericId, name, poster_path: poster, overview: overview||'', genresHint, primaryType, aliases, searchScore, year:readYear(r.year ?? r.firstAired ?? r.first_aired ?? r.firstAiredDate) };
   }).filter(Boolean);
@@ -1630,6 +1646,25 @@ async function getTvDetails(tvdbId,{fast=false,fresh=false}={}){
   const runtime = tv.averageRuntime || tv.runtime || null;
   const relatedSeries=await relatedSeriesPromise;
   return tvdbSeriesToAnimeShape({ id: tv.id, name: englishName, image: tv.image, genres, overview, seasons, numberOfSeasons: seasons.length, numberOfEpisodes: seasons.reduce((a,s)=>a+(s.episodeCount||0),0), status, runtime, year:readYear(tv.firstAired ?? tv.year), firstAiredYear:readYear(tv.firstAired ?? tv.year), anilistId:extractAniListRemoteId(tv), relatedSeries, detailsPending:fast });
+}
+async function ensureEnglishLibraryTitle(item){
+  if(!item||isEnglishText(item.title)||!hasApiKey()) return;
+  try{
+    const tv=await fetchTvdbSeriesExtended(item.tvdbId);
+    const english=pickEnglishNameFromExtended(tv);
+    if(!isEnglishText(english)||english===item.title) return;
+    item.title=english;
+    await saveItem(item);
+    if(state.view==='detail'&&!state.previewMode&&state.detailId===item.id) render();
+  }catch(error){ console.warn('Could not resolve English library title',item.tvdbId,error); }
+}
+async function refreshNonEnglishLibraryTitles(){
+  if(!hasApiKey()) return;
+  const pending=[...state.library,...state.showLibrary].filter(item=>!isEnglishText(item.title));
+  for(let i=0;i<pending.length;i+=4){
+    await Promise.all(pending.slice(i,i+4).map(item=>ensureEnglishLibraryTitle(item)));
+    if(state.view==='home') render();
+  }
 }
 async function testConnection(){
   // Will trigger login and a tiny search
@@ -2175,6 +2210,7 @@ async function openDetail(localId){
   state.view='detail'; state.previewMode=false; state.detailId=localId;
   if(item) markTitleUpdatesSeen(item);
   render();
+  if(item && !isEnglishText(item.title)) ensureEnglishLibraryTitle(item);
   if(item && state.activeTab==='anime'){
     enrichAniListRelations(item).then(enriched=>{
       if(enriched && state.view==='detail' && !state.previewMode && state.detailId===localId && state.activeTab==='anime'){
@@ -2470,6 +2506,8 @@ document.getElementById('btn-bell').addEventListener('click',()=> openNotificati
 (async function boot(){
   try{ await loadFromDB(); }catch(e){ console.error('DB load failed',e); }
   applyTheme(); render();
+  // Correct legacy library titles in the background without delaying first paint.
+  refreshNonEnglishLibraryTitles().catch(error=>console.warn('Background English-title refresh failed',error));
 })();
 </script>
 <script>
