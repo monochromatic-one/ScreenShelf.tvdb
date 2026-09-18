@@ -1,0 +1,42 @@
+{
+  "name": "ScreenShelf 🍥",
+  "short_name": "ScreenShelf",
+  "description": "Track shows & anime — stays in your browser. TVDB + IndexedDB, no cloud.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "browser"],
+  "background_color": "#121319",
+  "theme_color": "#121319",
+  "orientation": "portrait-primary",
+  "categories": ["entertainment"],
+  "lang": "en",
+  "dir": "ltr",
+  "icons": [
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Search",
+      "url": "./#search",
+      "description": "Search TVDB"
+    },
+    {
+      "name": "Settings",
+      "url": "./#settings",
+      "description": "Open Settings"
+    }
+  ],
+  "handle_links": "preferred"
+}
