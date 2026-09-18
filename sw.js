@@ -1,5 +1,5 @@
 /* ScreenShelf — Service Worker */
-const CACHE_NAME = 'screenshelf-v10';
+const CACHE_NAME = 'screenshelf-v11';
 const CORE_ASSETS = [
   './',
   './index.html',

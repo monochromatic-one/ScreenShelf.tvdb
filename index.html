@@ -192,14 +192,20 @@
   .detail-stats b{ color:var(--text); }
   .detail-genres{ display:flex; justify-content:center; flex-wrap:wrap; gap:6px; margin:10px auto 0; max-width:480px; }
   .detail-genre{ padding:4px 9px; border-radius:999px; background:var(--surface); border:1px solid var(--border); color:var(--muted); font-size:11px; font-weight:700; line-height:1.2; }
+  .detail-description-wrap{ max-width:560px; margin:12px auto 0; text-align:left; }
+  .detail-description{ color:var(--muted); font-size:13px; line-height:1.45; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:4; overflow:hidden; }
+  .detail-description.expanded{ display:block; }
+  .detail-description-toggle{ margin-top:4px; padding:0; border:0; background:none; color:var(--accent); font-size:12px; font-weight:800; }
+  .detail-description-toggle:hover{ text-decoration:underline; }
   .tvdb-score{ display:flex; align-items:center; justify-content:center; gap:5px; margin-top:9px; font-size:12px; color:var(--muted); font-weight:700; }
   .tvdb-score-mark{ color:#2b6cb0; font-size:10px; font-weight:900; letter-spacing:-.35px; }
   .detail-tvdb-status{ margin-top:9px; font-size:12.5px; color:var(--muted); }
   .detail-actions{ padding:8px 4px 22px; display:flex; flex-direction:column; gap:10px; }
   .status-pill{
     display:inline-flex; align-items:center; gap:7px; font-size:12.5px; font-weight:700; padding:7px 13px 7px 10px;
-    border-radius:999px; background:var(--surface); border:1px solid var(--border); align-self:center;
+    border-radius:999px; background:var(--surface); border:1px solid var(--border); align-self:center; color:var(--text); cursor:pointer;
   }
+  .status-pill:hover{ background:var(--surface-2); }
   .status-pill .status-dot{ width:7px; height:7px; }
   .detail-meta-row{ display:flex; align-items:center; justify-content:center; gap:10px; flex-wrap:wrap; }
   .rating-pill{
@@ -599,6 +605,32 @@ function pickEnglishNameFromExtended(tv){
   }
   return (tv.name || '').trim();
 }
+function pickEnglishOverviewFromExtended(tv){
+  const direct=typeof tv.overview==='string'?tv.overview.trim():'';
+  if(direct && !hasJapanese(direct)) return direct;
+  const readTranslation=(value)=>{
+    if(typeof value==='string') return value.trim()&&!hasJapanese(value)?value.trim():'';
+    if(Array.isArray(value)){
+      for(const row of value){
+        if(!row||typeof row!=='object') continue;
+        const lang=String(row.language||row.lang||'').trim();
+        if(!/^en(g)?$/i.test(lang)) continue;
+        const text=row.overview||row.description||row.value||row.name;
+        if(typeof text==='string'&&text.trim()&&!hasJapanese(text)) return text.trim();
+      }
+      return '';
+    }
+    if(value&&typeof value==='object'){
+      for(const key of ['eng','en']){
+        const text=value[key];
+        if(typeof text==='string'&&text.trim()&&!hasJapanese(text)) return text.trim();
+      }
+    }
+    return '';
+  };
+  const translated=readTranslation(tv.overviewTranslations)||readTranslation(tv.translations?.overviewTranslations)||readTranslation(tv.translations?.overview);
+  return translated||'';
+}
 function seasonDisplayName(s, fallbackNumber){
   if(typeof s.name==='string' && s.name.trim() && !hasJapanese(s.name)) return s.name.trim();
   return 'Season '+fallbackNumber;
@@ -629,6 +661,7 @@ async function fetchEnglishSeasonName(s){
 const MAX_PROFILE_PHOTO_LENGTH = 300000;
 const MAX_LIBRARY_TITLE_LENGTH = 240;
 const MAX_SEASON_NAME_LENGTH = 160;
+const MAX_OVERVIEW_LENGTH = 6000;
 
 function normalizeText(value, maxLength){ return typeof value==='string'? value.trim().slice(0,maxLength):''; }
 function boundedInteger(value,min,max,fallback){
@@ -695,6 +728,7 @@ function normalizeLibraryItem(value, mediaType){
       tvdbStatus: normalizeText(meta.tvdbStatus||meta.tmdbStatus||'',120),
       tmdbStatus: normalizeText(meta.tmdbStatus||meta.tvdbStatus||'',120),
       episodeRuntime: boundedInteger(meta.episodeRuntime,1,1440,null),
+      overview: normalizeText(meta.overview||meta.description||'',MAX_OVERVIEW_LENGTH),
       score: null,
       tmdbVoteAverage,
       tmdbVoteCount,
@@ -927,6 +961,7 @@ function tvdbSeriesToAnimeShape(tv){
     tvdbStatus: tv.status||'',
     tmdbStatus: tv.status||'',
     episodeRuntime: tv.runtime||null,
+    overview: normalizeText(tv.overview,MAX_OVERVIEW_LENGTH),
     // TVDB score is not a rating; TMDB rating fields are populated separately.
     score: null,
     tmdbVoteAverage: null,
@@ -954,6 +989,7 @@ async function getTvDetails(tvdbId){
   const englishName = pickEnglishNameFromExtended(tv);
   // genres
   const genres = Array.isArray(tv.genres)? tv.genres.map(g=> typeof g==='string'? g: g.name).filter(Boolean):[];
+  const overview = pickEnglishOverviewFromExtended(tv);
   // seasons — use English season name, fallback to "Season N" if Japanese
   let seasonsRaw = Array.isArray(tv.seasons)
     ? tv.seasons.filter(s=> s.number!==0 && s.type && s.type.type==='official').sort((a,b)=> a.number-b.number)
@@ -1055,7 +1091,7 @@ async function getTvDetails(tvdbId){
   }
   const status = tv.status?.name || tv.status || '';
   const runtime = tv.averageRuntime || tv.runtime || null;
-  return tvdbSeriesToAnimeShape({ id: tv.id, name: englishName, image: tv.image, genres, seasons, numberOfSeasons: seasons.length, numberOfEpisodes: seasons.reduce((a,s)=>a+(s.episodeCount||0),0), status, runtime });
+  return tvdbSeriesToAnimeShape({ id: tv.id, name: englishName, image: tv.image, genres, overview, seasons, numberOfSeasons: seasons.length, numberOfEpisodes: seasons.reduce((a,s)=>a+(s.episodeCount||0),0), status, runtime });
 }
 async function testConnection(){
   // Will trigger login and a tiny search
@@ -1429,6 +1465,12 @@ function tvdbGenresMarkup(meta){
   if(!g.length) return '';
   return `<div class="detail-genres">${g.map(x=>`<span class="detail-genre">${escapeHtml(x)}</span>`).join('')}</div>`;
 }
+function tvdbDescriptionMarkup(meta){
+  const text=meta&&typeof meta.overview==='string'?meta.overview.trim():'';
+  if(!text) return '';
+  const needsMore=text.length>220 || text.split(/\s+/).length>38;
+  return `<div class="detail-description-wrap"><div class="detail-description" id="detail-description">${escapeHtml(text)}</div>${needsMore?'<button class="detail-description-toggle" type="button" data-description-toggle="1" aria-expanded="false">More</button>':''}</div>`;
+}
 function tvdbTitleLink(item){
   const id=item && (item.tvdbId||item.tmdbId);
   if(!id) return '';
@@ -1457,9 +1499,10 @@ function renderDetail(){
   if(state.previewMode && !owned) actions=`<div class="detail-actions"><button class="btn btn-accent btn-block" data-add-anime="1">Add to library</button></div>`;
   else if(state.previewMode && owned){const st=map[owned.status]||map.planned; actions=`<div class="detail-actions"><div class="status-pill status-${owned.status}"><span class="status-dot"></span>${st.label} ${st.emoji}</div><button class="btn btn-ghost btn-block" data-open-detail="${escapeHtml(owned.id)}">View in library</button></div>`;}
   else {const st=map[a.status]||map.planned; const rating=(a.rating&&RATING_MAP[a.rating])?RATING_MAP[a.rating]:null;
-    actions=`<div class="detail-actions"><div class="detail-meta-row"><div class="status-pill status-${a.status}"><span class="status-dot"></span>${st.label} ${st.emoji}</div><button class="rating-pill" data-open-rating="1">Rating: <span class="rating-emoji">${rating? `${rating.emoji} ${escapeHtml(rating.label)}` : RATING_UNSET_EMOJI}</span></button></div><button class="btn btn-ghost btn-block" data-change-status="1">Change status</button></div>`;}
+    actions=`<div class="detail-actions"><div class="detail-meta-row"><button class="status-pill status-${a.status}" type="button" data-change-status="1" aria-label="Change status, currently ${escapeHtml(st.label)}"><span class="status-dot"></span>${st.label} ${st.emoji}</button><button class="rating-pill" data-open-rating="1">Rating: <span class="rating-emoji">${rating? `${rating.emoji} ${escapeHtml(rating.label)}` : RATING_UNSET_EMOJI}</span></button></div></div>`;}
   const score = tvdbScoreMarkup(a.tvdbMeta||a.tmdbMeta);
   const genres = tvdbGenresMarkup(a.tvdbMeta||a.tmdbMeta);
+  const description = tvdbDescriptionMarkup(a.tvdbMeta||a.tmdbMeta);
   const statusLine = (a.tvdbMeta&&a.tvdbMeta.tvdbStatus) ? `<div class="detail-tvdb-status">TVDB status: ${escapeHtml(a.tvdbMeta.tvdbStatus)}</div>` : '';
   const link = tvdbTitleLink(a);
   const refreshButton = tvdbRefreshButton(a);
@@ -1468,8 +1511,8 @@ function renderDetail(){
   const refresh = !state.previewMode? tvdbRefreshMarkup(a.tvdbMeta||a.tmdbMeta) : '';
   return `<div class="view-head"><button class="back-btn" data-go="${state.previewMode?'search':'home'}">← Back</button></div>
     <div class="detail-hero"><h1 class="detail-title">${escapeHtml(a.title)}</h1><div class="detail-poster-wrap"><img class="detail-poster" src="${posterSrc(a.poster)}" alt=""></div>
-    <div class="detail-stats"><b>${seasons.length}</b>&nbsp;seasons&nbsp;&nbsp;·&nbsp;&nbsp;<b>${total}</b>&nbsp;episodes</div>${genres}${score}${statusLine}${tvdbTools}</div>
-    ${actions}<div class="section-label">Seasons</div><div id="season-list">${seasonRows}</div>${del}${refresh}`;
+    <div class="detail-stats"><b>${seasons.length}</b>&nbsp;seasons&nbsp;&nbsp;·&nbsp;&nbsp;<b>${total}</b>&nbsp;episodes</div>${genres}${description}${score}${statusLine}</div>
+    ${actions}<div class="section-label">Seasons</div><div id="season-list">${seasonRows}</div>${del}${refresh}${tvdbTools}`;
 }
 function renderSeasonRow(s, idx){
   const checked=!!s.watched;
@@ -1818,6 +1861,7 @@ async function refreshCurrentTitle(){
       tvdbStatus:st,
       tmdbStatus:st,
       episodeRuntime:freshMeta.episodeRuntime,
+      overview:freshMeta.overview,
       genres:freshMeta.genres,
       tvdbRefreshedAt:Date.now(),
       score:null,
@@ -1864,6 +1908,14 @@ function wireViewEvents(){
   if(searchInput) searchInput.addEventListener('input', e=> onSearchInput(e.target.value));
   main.querySelectorAll('[data-preview]').forEach(el=> el.addEventListener('click',()=> openPreview(Number(el.getAttribute('data-preview')))));
   main.querySelectorAll('[data-toggle-watched]').forEach(el=> el.addEventListener('click',()=> toggleSeasonWatched(Number(el.getAttribute('data-toggle-watched')))));
+  const descriptionToggle=main.querySelector('[data-description-toggle]');
+  if(descriptionToggle) descriptionToggle.addEventListener('click',()=>{
+    const description=document.getElementById('detail-description');
+    if(!description) return;
+    const expanded=description.classList.toggle('expanded');
+    descriptionToggle.textContent=expanded?'Less':'More';
+    descriptionToggle.setAttribute('aria-expanded',String(expanded));
+  });
   main.querySelector('[data-add-anime]')?.addEventListener('click', addPreviewToLibrary);
   main.querySelector('[data-change-status]')?.addEventListener('click', openStatusSheet);
   main.querySelector('[data-open-rating]')?.addEventListener('click', openRatingSheet);
