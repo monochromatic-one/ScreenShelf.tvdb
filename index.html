@@ -181,6 +181,8 @@
   .search-poster{ width:100%; aspect-ratio:2/3; border-radius:10px; object-fit:cover; background:var(--surface-2); border:1px solid var(--border); margin-bottom:7px; }
   .search-card-title{ font-size:13px; font-weight:600; line-height:1.3; }
   .search-card-owned{ font-size:11px; color:var(--accent); font-weight:700; margin-top:2px; }
+  .search-primary-label{ color:var(--muted); font-size:12px; font-weight:800; padding:4px 4px 8px; }
+  .search-primary-note{ color:var(--muted); font-size:12px; line-height:1.4; padding:8px 4px 0; }
   .detail-hero{ text-align:center; padding:6px 4px 18px; }
   .detail-title{ font-size:19px; font-weight:800; margin:0 0 16px; line-height:1.3; }
   .detail-poster-wrap{ position:relative; max-width:230px; margin:0 auto; }
@@ -236,6 +238,19 @@
   .tvdb-refresh-btn:hover{ background:var(--surface-2); color:var(--text); }
   .tvdb-refresh-btn:disabled{ cursor:wait; opacity:.65; }
   .tvdb-refresh-time{ padding:24px 4px 8px; color:var(--muted); text-align:center; font-size:11.5px; line-height:1.4; }
+  .related-series{ margin-top:20px; padding-top:16px; border-top:1px solid var(--border); }
+  .related-series-title{ font-size:14px; font-weight:800; margin:0 4px 3px; }
+  .related-series-subtitle{ color:var(--muted); font-size:11.5px; margin:0 4px 12px; }
+  .related-series-group{ margin-top:12px; }
+  .related-series-list-name{ color:var(--muted); font-size:11.5px; font-weight:800; margin:0 4px 7px; }
+  .related-series-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(100px,1fr)); gap:12px; }
+  .related-series-card{ min-width:0; padding:0; border:0; background:none; color:var(--text); text-align:left; }
+  .related-series-card:hover .related-series-poster{ border-color:var(--accent); transform:translateY(-2px); }
+  .related-series-poster{ width:100%; aspect-ratio:2/3; border:1px solid var(--border); border-radius:9px; background:var(--surface-2); object-fit:cover; transition:transform .15s ease,border-color .15s ease; }
+  .related-series-name{ display:block; margin-top:6px; font-size:12px; font-weight:700; line-height:1.25; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .related-series-meta{ display:block; margin-top:2px; color:var(--muted); font-size:10.5px; line-height:1.25; }
+  .related-series-loading{ display:flex; align-items:center; gap:8px; margin:10px 4px 2px; padding:10px 11px; border:1px solid var(--border); border-radius:10px; background:var(--surface); color:var(--muted); font-size:12px; font-weight:600; }
+  .related-series-loading .spinner{ font-size:17px; line-height:1; }
   .profile-row{ display:flex; align-items:center; gap:16px; }
   .avatar-wrap{
     position:relative; width:64px; height:64px; border-radius:50%; flex:none;
@@ -450,6 +465,13 @@ const RATING_UNSET_EMOJI = '❓';
 const ANIME_FALLBACK_RUNTIME_MIN = 24;
 const SERIES_FALLBACK_RUNTIME_MIN = 50;
 const TVDB_BASE = 'https://api4.thetvdb.com/v4';
+const ANILIST_GRAPHQL = 'https://graphql.anilist.co';
+const ANILIST_MAPPING_CACHE_TTL = 30*24*60*60*1000;
+const ANILIST_RELATIONS_CACHE_TTL = 14*24*60*60*1000;
+const ANILIST_UNMATCHED_CACHE_TTL = 24*60*60*1000;
+const ANILIST_REQUEST_TIMEOUT = 9000;
+const anilistMappingCache = new Map();
+const anilistRelationsCache = new Map();
 const ACCENTS = ['#e3a23b','#9b8ce0','#5fa3a0','#c97b84','#6fa679','#7f9fe0'];
 const PLACEHOLDER_SVG = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="300"><rect width="100%" height="100%" fill="#272a35"/><text x="50%" y="52%" font-size="46" text-anchor="middle" fill="#565a6b" font-family="sans-serif">🎬</text></svg>'
@@ -477,6 +499,7 @@ const state = {
   previewMode: false,
   previewTvdb: null,
   refreshingTitleId: null,
+  anilistLoadingTvdbId: null,
   sortBy: { anime: 'az', shows: 'az' },
   libraryView: 'list',
 };
@@ -492,7 +515,7 @@ function escapeHtml(s){
    IndexedDB — single source of truth (replaces Firestore)
 ========================================================= */
 const DB_NAME = 'screenshelf-tvdb-local';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 let dbPromise = null;
 function getDB(){
   if(dbPromise) return dbPromise;
@@ -506,9 +529,10 @@ function getDB(){
       if(!db.objectStoreNames.contains('series')) db.createObjectStore('series',{keyPath:'id'});
       if(!db.objectStoreNames.contains('notifications')) db.createObjectStore('notifications',{keyPath:'id'});
       if(!db.objectStoreNames.contains('animationCache')) db.createObjectStore('animationCache',{keyPath:'id'});
+      if(!db.objectStoreNames.contains('tvdbCache')) db.createObjectStore('tvdbCache',{keyPath:'id'});
       if(oldVersion<4 && db.objectStoreNames.contains('companionMovies')) db.deleteObjectStore('companionMovies');
       if(oldVersion<5 && db.objectStoreNames.contains('tmdbRatingCache')) db.deleteObjectStore('tmdbRatingCache');
-      // v1 -> v2/v3/v4/v5 migrations happen automatically (new stores are created and retired stores are removed)
+      // v1 -> v2/v3/v4/v5/v6 migrations happen automatically (new stores are created and retired stores are removed)
     };
     req.onsuccess = ()=> resolve(req.result);
     req.onerror = ()=> reject(req.error);
@@ -689,6 +713,61 @@ function normalizeTvdbGenres(value){
     return normalizeText(raw,60);
   }).filter(n=>{ if(!n||seen.has(n)) return false; seen.add(n); return true; });
 }
+function normalizeRelatedSeries(value){
+  if(!Array.isArray(value)) return [];
+  const seen=new Set();
+  return value.slice(0,6).map(group=>{
+    if(!group||typeof group!=='object') return null;
+    const listId=normalizeTvdbId(group.id);
+    const listName=normalizeText(group.name,120) || 'TVDB franchise';
+    const items=Array.isArray(group.items)? group.items.slice(0,20).map(item=>{
+      if(!item||typeof item!=='object') return null;
+      const id=normalizeTvdbId(item.id ?? item.tvdbId);
+      const title=normalizeText(item.title||item.name,MAX_LIBRARY_TITLE_LENGTH);
+      if(id==null||!title||seen.has(id)) return null;
+      seen.add(id);
+      return {
+        id,
+        title,
+        poster: typeof item.poster==='string'?item.poster.trim()||null:null,
+        year: normalizeText(item.year,20),
+        status: normalizeText(item.status,80),
+      };
+    }).filter(Boolean):[];
+    return listId!=null&&items.length?{id:listId,name:listName,items}:null;
+  }).filter(Boolean);
+}
+function normalizeAniListId(value){ return boundedInteger(value,1,2147483647,null); }
+function normalizeAniListRelatedSeries(value){
+  if(!Array.isArray(value)) return [];
+  const seen=new Set();
+  return value.slice(0,2).map(group=>{
+    if(!group||typeof group!=='object') return null;
+    const groupId=normalizeText(group.id,80) || 'anilist-relations';
+    const groupName=normalizeText(group.name,120) || 'AniList relations';
+    const items=Array.isArray(group.items)? group.items.slice(0,20).map(item=>{
+      if(!item||typeof item!=='object') return null;
+      const id=normalizeTvdbId(item.id ?? item.tvdbId);
+      const title=normalizeText(item.title||item.name,MAX_LIBRARY_TITLE_LENGTH);
+      if(id==null||!title||seen.has(id)) return null;
+      seen.add(id);
+      return {
+        id,
+        title,
+        poster: typeof item.poster==='string'?item.poster.trim()||null:null,
+        year: normalizeText(item.year,20),
+        status: normalizeText(item.status,80),
+        relationType: normalizeText(item.relationType,40).toUpperCase(),
+        relationLabel: normalizeText(item.relationLabel,50),
+        relationDepth: boundedInteger(item.relationDepth,0,4,0),
+        relatedVia: normalizeText(item.relatedVia,MAX_LIBRARY_TITLE_LENGTH),
+        relationPath: normalizeText(item.relationPath,MAX_LIBRARY_TITLE_LENGTH*2),
+        anilistId: normalizeAniListId(item.anilistId),
+      };
+    }).filter(Boolean):[];
+    return items.length?{id:groupId,name:groupName,items}:null;
+  }).filter(Boolean);
+}
 function normalizeLibraryItem(value, mediaType){
   if(!value||typeof value!=='object'||Array.isArray(value)) return null;
   // TVDB build: only accept tvdbId (or id as alias), not tmdbId — prevents TMDB ID namespace collision
@@ -729,6 +808,14 @@ function normalizeLibraryItem(value, mediaType){
       tmdbVoteCount: null,
       tmdbRatingCheckedAt: null,
       genres: normalizeTvdbGenres(meta.genres),
+      relatedSeries: normalizeRelatedSeries(meta.relatedSeries),
+      anilistId: normalizeAniListId(meta.anilistId),
+      anilistMatchedTitle: normalizeText(meta.anilistMatchedTitle,MAX_LIBRARY_TITLE_LENGTH),
+      anilistMatchYear: boundedInteger(meta.anilistMatchYear,1900,2200,null),
+      anilistRelatedSeries: normalizeAniListRelatedSeries(meta.anilistRelatedSeries),
+      anilistCheckedAt: boundedInteger(meta.anilistCheckedAt,0,4102444800000,null),
+      firstAiredYear: boundedInteger(meta.firstAiredYear,1900,2200,null),
+      detailsPending: !!meta.detailsPending,
       tvdbRefreshedAt: boundedInteger(meta.tvdbRefreshedAt||meta.tmdbRefreshedAt,0,4102444800000,null),
     },
     tmdbMeta: null, // will be duplicated for compat
@@ -849,7 +936,71 @@ function applyTheme(){
 /* ---------- TVDB API ---------- */
 let tvdbToken=null;
 let tvdbTokenExpiresAt=0;
+const TVDB_EXTENDED_CACHE_TTL=10*60*1000;
+const TVDB_BASE_CACHE_TTL=30*60*1000;
+const TVDB_LIST_CACHE_TTL=30*60*1000;
+const tvdbExtendedCache=new Map();
+const tvdbBaseCache=new Map();
+const tvdbListCache=new Map();
 function hasApiKey(){ return !!(state.settings.tvdbApiKey && state.settings.tvdbApiKey.trim()); }
+async function readTvdbCache(key,ttl){
+  try{
+    const row=await idbGet('tvdbCache',key);
+    if(row&&row.data&&typeof row.checkedAt==='number'&&Date.now()-row.checkedAt<ttl) return row.data;
+  }catch(e){}
+  return null;
+}
+function writeTvdbCache(key,data){
+  idbPut('tvdbCache',{id:key,data,checkedAt:Date.now()}).catch(()=>{});
+}
+async function fetchTvdbSeriesExtended(tvdbId,{fresh=false}={}){
+  const id=normalizeTvdbId(tvdbId);
+  if(id==null) throw new Error('Invalid TVDB id.');
+  const cached=tvdbExtendedCache.get(id);
+  if(!fresh&&cached&&Date.now()-cached.checkedAt<TVDB_EXTENDED_CACHE_TTL) return cached.data;
+  if(!fresh){
+    const stored=await readTvdbCache('series-extended-'+id,TVDB_EXTENDED_CACHE_TTL);
+    if(stored){ tvdbExtendedCache.set(id,{data:stored,checkedAt:Date.now()}); return stored; }
+  }
+  const json=await tvdbFetch('/series/'+id+'/extended',{meta:'translations'});
+  const data=json.data;
+  if(!data||!data.id) throw new Error('TVDB returned invalid data.');
+  tvdbExtendedCache.set(id,{data,checkedAt:Date.now()});
+  writeTvdbCache('series-extended-'+id,data);
+  return data;
+}
+async function fetchTvdbSeriesBase(tvdbId,{fresh=false}={}){
+  const id=normalizeTvdbId(tvdbId);
+  if(id==null) return null;
+  const cached=tvdbBaseCache.get(id);
+  if(!fresh&&cached&&Date.now()-cached.checkedAt<TVDB_BASE_CACHE_TTL) return cached.data;
+  if(!fresh){
+    const stored=await readTvdbCache('series-base-'+id,TVDB_BASE_CACHE_TTL);
+    if(stored){ tvdbBaseCache.set(id,{data:stored,checkedAt:Date.now()}); return stored; }
+  }
+  const json=await tvdbFetch('/series/'+id,{});
+  const data=json.data;
+  if(!data||!data.id) return null;
+  tvdbBaseCache.set(id,{data,checkedAt:Date.now()});
+  writeTvdbCache('series-base-'+id,data);
+  return data;
+}
+async function fetchTvdbListExtended(listId,{fresh=false}={}){
+  const id=normalizeTvdbId(listId);
+  if(id==null) return null;
+  const cached=tvdbListCache.get(id);
+  if(!fresh&&cached&&Date.now()-cached.checkedAt<TVDB_LIST_CACHE_TTL) return cached.data;
+  if(!fresh){
+    const stored=await readTvdbCache('list-extended-'+id,TVDB_LIST_CACHE_TTL);
+    if(stored){ tvdbListCache.set(id,{data:stored,checkedAt:Date.now()}); return stored; }
+  }
+  const json=await tvdbFetch('/lists/'+id+'/extended',{});
+  const data=json.data||null;
+  if(!data) return null;
+  tvdbListCache.set(id,{data,checkedAt:Date.now()});
+  writeTvdbCache('list-extended-'+id,data);
+  return data;
+}
 async function tvdbLogin(){
   if(!hasApiKey()){ const e=new Error('No TVDB API key configured.'); e.code='NO_KEY'; throw e; }
   const body={ apikey: state.settings.tvdbApiKey.trim() };
@@ -889,8 +1040,375 @@ async function tvdbFetch(path, params){
   }
   return res.json();
 }
+/* ---------- Optional AniList anime relations ---------- */
+const ANILIST_RESOLVE_QUERY = `query ($search: String!, $perPage: Int) {
+  Page(perPage: $perPage) {
+    media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
+      id
+      title { romaji english native }
+      startDate { year }
+    }
+  }
+}`;
+const ANILIST_MEDIA_QUERY = `query ($id: Int!) {
+  Media(id: $id, type: ANIME) {
+    id
+    title { romaji english native }
+    startDate { year }
+    relations {
+      edges {
+        relationType
+        node {
+          id
+          type
+          format
+          title { romaji english native }
+          coverImage { extraLarge large medium }
+          startDate { year }
+        }
+      }
+    }
+  }
+}`;
+function anilistTitleValues(media){
+  const title=media&&media.title||{};
+  return [title.english,title.romaji,title.native].filter(v=>typeof v==='string'&&v.trim());
+}
+function anilistPreferredTitle(media){ return anilistTitleValues(media)[0]||''; }
+function anilistRelationLabel(type){
+  const raw=String(type||'').trim().toLowerCase().replace(/_/g,' ');
+  return raw.replace(/\b\w/g,c=>c.toUpperCase());
+}
+function extractAniListRemoteId(tv){
+  const remoteIds=Array.isArray(tv?.remoteIds)?tv.remoteIds:[];
+  for(const row of remoteIds){
+    if(!row||typeof row!=='object') continue;
+    const label=[row.sourceName,row.source,row.type,row.name].filter(Boolean).join(' ');
+    if(!/anilist/i.test(label)) continue;
+    const id=normalizeAniListId(row.id ?? row.value ?? row.remoteId ?? row.remote_id);
+    if(id!=null) return id;
+  }
+  return null;
+}
+function readYear(value){
+  const match=String(value??'').match(/\b(19\d{2}|20\d{2}|21\d{2})\b/);
+  return match?Number(match[1]):null;
+}
+function anilistTitleSimilarity(left,right){
+  const a=normalizedSearchText(left).replace(/\s*\((?:19|20)\d{2}\)\s*$/,'').trim();
+  const b=normalizedSearchText(right).replace(/\s*\((?:19|20)\d{2}\)\s*$/,'').trim();
+  if(!a||!b) return 0;
+  if(a===b) return 1;
+  if(a.startsWith(b)||b.startsWith(a)) return Math.min(a.length,b.length)/Math.max(a.length,b.length)*.12+.78;
+  if(a.includes(b)||b.includes(a)) return Math.min(a.length,b.length)/Math.max(a.length,b.length)*.1+.7;
+  const aa=new Set(a.split(/\s+/).filter(Boolean));
+  const bb=new Set(b.split(/\s+/).filter(Boolean));
+  const overlap=[...aa].filter(token=>bb.has(token)).length;
+  return overlap?overlap/Math.max(aa.size,bb.size):0;
+}
+function chooseAniListCandidate(candidates,title,year){
+  const target=normalizedSearchText(title);
+  if(!target||!Array.isArray(candidates)||!candidates.length) return null;
+  const scored=candidates.map((candidate,index)=>{
+    const similarities=anilistTitleValues(candidate).map(value=>anilistTitleSimilarity(target,value));
+    const similarity=Math.max(0,...similarities);
+    const candidateYear=readYear(candidate.startDate?.year);
+    const yearDelta=year!=null&&candidateYear!=null?Math.abs(year-candidateYear):null;
+    let score=similarity*1000;
+    if(yearDelta===0) score+=80;
+    else if(yearDelta===1) score+=20;
+    else if(yearDelta!=null&&yearDelta>3) score-=80;
+    return {candidate,index,similarity,candidateYear,yearDelta,score};
+  }).sort((a,b)=>b.score-a.score||a.index-b.index);
+  const top=scored[0];
+  const exact=scored.filter(x=>x.similarity>=.995);
+  if(exact.length>1){
+    const yearExact=year!=null?exact.filter(x=>x.candidateYear===year):[];
+    if(yearExact.length===1) return yearExact[0].candidate;
+    if(!yearExact.length && new Set(exact.map(x=>x.candidateYear).filter(Boolean)).size>1) return null;
+  }
+  if(top.similarity<.82) return null;
+  const second=scored[1];
+  if(second && top.similarity<.995 && top.similarity-second.similarity<.08 && (top.yearDelta==null||second.yearDelta==null||top.yearDelta!==0)) return null;
+  if(year!=null&&top.candidateYear!=null&&top.yearDelta>3&&top.similarity<.995) return null;
+  return top.candidate;
+}
+async function anilistGraphql(query,variables){
+  const controller=typeof AbortController==='function'?new AbortController():null;
+  const timer=controller?setTimeout(()=>controller.abort(),ANILIST_REQUEST_TIMEOUT):null;
+  try{
+    const options={method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({query,variables})};
+    if(controller) options.signal=controller.signal;
+    const response=await fetch(ANILIST_GRAPHQL,options);
+    if(!response.ok){
+      const error=new Error('AniList request failed ('+response.status+').');
+      error.code='ANILIST_HTTP_'+response.status;
+      throw error;
+    }
+    const payload=await response.json();
+    if(payload?.errors?.length){
+      const error=new Error(payload.errors[0]?.message||'AniList returned an error.');
+      error.code='ANILIST_GRAPHQL';
+      throw error;
+    }
+    return payload?.data||null;
+  }catch(error){
+    if(error?.name==='AbortError'){
+      const timeoutError=new Error('AniList request timed out.');
+      timeoutError.code='ANILIST_TIMEOUT';
+      throw timeoutError;
+    }
+    throw error;
+  }finally{
+    if(timer) clearTimeout(timer);
+  }
+}
+async function resolveAniListMediaForItem(item){
+  const tvdbId=normalizeTvdbId(item?.tvdbId||item?.id);
+  if(tvdbId==null||!item?.title) return null;
+  if(anilistMappingCache.has(tvdbId)) return anilistMappingCache.get(tvdbId);
+  const missingKey='anilist-missing-'+tvdbId;
+  const missing=await readTvdbCache(missingKey,ANILIST_UNMATCHED_CACHE_TTL);
+  if(missing) return null;
+  const cacheKey='anilist-map-'+tvdbId;
+  const cached=await readTvdbCache(cacheKey,ANILIST_MAPPING_CACHE_TTL);
+  if(cached&&normalizeAniListId(cached.id)!=null){
+    anilistMappingCache.set(tvdbId,cached);
+    return cached;
+  }
+  const year=item.tvdbMeta?.firstAiredYear ?? null;
+  let media=null;
+  let matchedBy='title';
+  const remoteId=normalizeAniListId(item.tvdbMeta?.anilistId);
+  if(remoteId!=null){
+    try{
+      const direct=await anilistGraphql(ANILIST_MEDIA_QUERY,{id:remoteId});
+      if(direct?.Media?.id) { media=direct.Media; matchedBy='TVDB remote ID'; }
+    }catch(error){ console.warn('AniList remote-ID lookup failed for',tvdbId,error); }
+  }
+  if(!media){
+    const data=await anilistGraphql(ANILIST_RESOLVE_QUERY,{search:item.title,perPage:8});
+    const candidates=Array.isArray(data?.Page?.media)?data.Page.media:[];
+    media=chooseAniListCandidate(candidates,item.title,year);
+  }
+  if(!media||normalizeAniListId(media.id)==null){
+    writeTvdbCache(missingKey,{status:'unmatched'});
+    return null;
+  }
+  const resolved={
+    id:normalizeAniListId(media.id),
+    title:anilistPreferredTitle(media)||item.title,
+    year:readYear(media.startDate?.year),
+    matchedBy,
+  };
+  anilistMappingCache.set(tvdbId,resolved);
+  writeTvdbCache(cacheKey,resolved);
+  return resolved;
+}
+async function fetchAniListRelations(anilistId){
+  const id=normalizeAniListId(anilistId);
+  if(id==null) return null;
+  if(anilistRelationsCache.has(id)) return anilistRelationsCache.get(id);
+  // v4 keeps the useful branch graph and records the relation source when a
+  // connected branch is reached through another series.
+  const cacheKey='anilist-relations-v4-'+id;
+  const cached=await readTvdbCache(cacheKey,ANILIST_RELATIONS_CACHE_TTL);
+  if(cached&&Array.isArray(cached.items)){
+    anilistRelationsCache.set(id,cached);
+    return cached;
+  }
+  const data=await anilistGraphql(ANILIST_MEDIA_QUERY,{id});
+  const media=data?.Media;
+  if(!media) return null;
+  const allowed=new Set(['PREQUEL','SEQUEL','SIDE_STORY','SPIN_OFF','PARENT','ALTERNATIVE']);
+  const relationPriority={SEQUEL:0,PREQUEL:1,PARENT:2,SPIN_OFF:3,ALTERNATIVE:4,SIDE_STORY:5};
+  const seen=new Set();
+  const items=(Array.isArray(media.relations?.edges)?media.relations.edges:[]).map((edge,index)=>{
+    const node=edge?.node;
+    const relationType=String(edge?.relationType||'').toUpperCase();
+    if(!node||String(node.type).toUpperCase()!=='ANIME'||!allowed.has(relationType)) return null;
+    const relatedId=normalizeAniListId(node.id);
+    const title=anilistPreferredTitle(node)||anilistTitleValues(node)[0]||'';
+    if(relatedId==null||!title||seen.has(relatedId)) return null;
+    seen.add(relatedId);
+    return {
+      anilistId:relatedId,
+      relationType,
+      relationLabel:anilistRelationLabel(relationType),
+      title,
+      titles:anilistTitleValues(node),
+      poster:node.coverImage?.extraLarge||node.coverImage?.large||node.coverImage?.medium||null,
+      year:readYear(node.startDate?.year),
+      _relationOrder:relationPriority[relationType]??99,
+      _sourceOrder:index,
+    };
+  }).filter(Boolean).sort((a,b)=>a._relationOrder-b._relationOrder||a._sourceOrder-b._sourceOrder).slice(0,12)
+    .map(({_relationOrder,_sourceOrder,...item})=>item);
+  const result={ id, title:anilistPreferredTitle(media), year:readYear(media.startDate?.year), items };
+  anilistRelationsCache.set(id,result);
+  writeTvdbCache(cacheKey,result);
+  return result;
+}
+async function collectAniListUniverseRelations(rootId){
+  const root=await fetchAniListRelations(rootId);
+  if(!root) return null;
+  const rootAniListId=normalizeAniListId(rootId);
+  const merged=[];
+  const seen=new Set();
+  const append=(item,{depth=0,viaTitle='',path=root.title||''}={})=>{
+    // A second-level graph walk can point back to the title currently open.
+    // Never render that root title as its own related card.
+    if(!item||item.anilistId===rootAniListId||seen.has(item.anilistId)) return;
+    seen.add(item.anilistId);
+    merged.push({...item,relationDepth:depth,relatedVia:viaTitle,relationPath:path});
+  };
+  (root.items||[]).forEach(item=>append(item));
+  // AniList often links a long-running universe through an immediate sequel
+  // rather than repeating every later sequel on the original title. Follow one
+  // branch hop so Naruto can include Boruto through Shippuden. Keep side
+  // stories visible, but do not recursively walk every side story and special.
+  const expandable=new Set(['SEQUEL','PREQUEL','PARENT','SPIN_OFF','ALTERNATIVE']);
+  const nextNodes=(root.items||[]).filter(item=>expandable.has(item.relationType)).slice(0,4);
+  for(let i=0;i<nextNodes.length;i+=2){
+    const batch=nextNodes.slice(i,i+2);
+    const nested=await Promise.all(batch.map(item=>fetchAniListRelations(item.anilistId).catch(error=>{ console.warn('AniList relation expansion failed',item.anilistId,error); return null; })));
+    nested.forEach((group,index)=>{
+      if(!group) return;
+      const parent=batch[index];
+      (group.items||[]).forEach(item=>append(item,{depth:1,viaTitle:parent.title,path:(root.title||'')+' → '+parent.title}));
+    });
+  }
+  return {...root,items:merged.slice(0,20)};
+}
+function chooseTvdbCandidateForAniList(results,node,sourceTvdbId){
+  const titles=Array.isArray(node?.titles)?node.titles:[];
+  const year=node?.year??null;
+  const scored=(Array.isArray(results)?results:[]).map((result,index)=>{
+    if(normalizeTvdbId(result.id)===normalizeTvdbId(sourceTvdbId)) return null;
+    const names=[result.name,...(Array.isArray(result.aliases)?result.aliases:[])].filter(Boolean);
+    const similarity=Math.max(0,...titles.flatMap(t=>names.map(n=>anilistTitleSimilarity(t,n))));
+    const yearDelta=year!=null&&result.year!=null?Math.abs(year-result.year):null;
+    let score=similarity*1000;
+    if(yearDelta===0) score+=80;
+    else if(yearDelta===1) score+=20;
+    else if(yearDelta!=null&&yearDelta>3) score-=80;
+    return {result,index,similarity,yearDelta,score};
+  }).filter(Boolean).sort((a,b)=>b.score-a.score||a.index-b.index);
+  const top=scored[0];
+  if(!top||top.similarity<.82) return null;
+  const second=scored[1];
+  if(second&&top.similarity<.995&&top.similarity-second.similarity<.08&&(top.yearDelta==null||second.yearDelta==null||top.yearDelta!==0)) return null;
+  if(year!=null&&top.yearDelta!=null&&top.yearDelta>3&&top.similarity<.995) return null;
+  return top.result;
+}
+async function mapAniListNodeToTvdb(node,sourceTvdbId){
+  const anilistId=normalizeAniListId(node?.anilistId);
+  if(anilistId==null) return null;
+  const sourceId=normalizeTvdbId(sourceTvdbId);
+  const cacheKey='anilist-related-tvdb-'+anilistId;
+  const missingKey='anilist-related-missing-'+anilistId;
+  const cached=await readTvdbCache(cacheKey,ANILIST_MAPPING_CACHE_TTL);
+  if(cached&&normalizeTvdbId(cached.id)!=null){
+    // The TVDB mapping is title-specific, but relation direction is
+    // source-specific. Reapply the current edge's label instead of reusing
+    // the label from whichever title populated the cache first.
+    if(normalizeTvdbId(cached.id)===sourceId) return null;
+    return {...cached,relationType:node.relationType,relationLabel:node.relationLabel,relationDepth:boundedInteger(node.relationDepth,0,4,0),relatedVia:normalizeText(node.relatedVia,MAX_LIBRARY_TITLE_LENGTH),relationPath:normalizeText(node.relationPath,MAX_LIBRARY_TITLE_LENGTH*2),anilistId};
+  }
+  const missing=await readTvdbCache(missingKey,ANILIST_UNMATCHED_CACHE_TTL);
+  if(missing) return null;
+  let results=[];
+  const resultIds=new Set();
+  const searchTerms=Array.isArray(node.titles)&&node.titles.length?node.titles.slice(0,2):[node.title];
+  for(const term of searchTerms){
+    if(!term) continue;
+    try{
+      const data=await searchTv(term);
+      for(const result of (data.results||[])){
+        if(!resultIds.has(result.id)){ resultIds.add(result.id); results.push(result); }
+      }
+      // Stop early when the preferred title already produced an exact TVDB match;
+      // otherwise try the alternate AniList title before declaring it unmatched.
+      if(results.some(result=>Array.isArray(node.titles)&&node.titles.some(title=>anilistTitleSimilarity(title,result.name)>=.995))) break;
+    }catch(error){
+      console.warn('TVDB lookup for AniList relation failed',anilistId,error);
+      return null;
+    }
+  }
+  const match=chooseTvdbCandidateForAniList(results,node,sourceTvdbId);
+  if(!match){ writeTvdbCache(missingKey,{status:'unmatched'}); return null; }
+  if(Array.isArray(match.genresHint)&&match.genresHint.length){
+    const listedAnimated=match.genresHint.some(g=>/^(animation|anime)$/i.test(String(g).trim()));
+    if(!listedAnimated){ writeTvdbCache(missingKey,{status:'unmatched'}); return null; }
+  }else if(!(await isAnimatedForId(match.id))){
+    writeTvdbCache(missingKey,{status:'unmatched'});
+    return null;
+  }
+  const resolved={
+    id:normalizeTvdbId(match.id),
+    title:match.name,
+    poster:match.poster_path||node.poster||null,
+    year:match.year!=null?String(match.year):(node.year!=null?String(node.year):''),
+    status:'',
+    anilistId,
+  };
+  writeTvdbCache(cacheKey,resolved);
+  return {...resolved,relationType:node.relationType,relationLabel:node.relationLabel,relationDepth:boundedInteger(node.relationDepth,0,4,0),relatedVia:normalizeText(node.relatedVia,MAX_LIBRARY_TITLE_LENGTH),relationPath:normalizeText(node.relationPath,MAX_LIBRARY_TITLE_LENGTH*2)};
+}
+async function enrichAniListRelations(item){
+  if(!item||item.mediaType!=='anime') return null;
+  try{
+    const resolved=await resolveAniListMediaForItem(item);
+    if(!resolved) return null;
+    const relationData=await collectAniListUniverseRelations(resolved.id);
+    if(!relationData) return null;
+    const nodes=Array.isArray(relationData.items)?relationData.items:[];
+    const mapped=[];
+    const mappedTvdbIds=new Set();
+    for(let i=0;i<nodes.length;i+=4){
+      const batch=nodes.slice(i,i+4);
+      const rows=await Promise.all(batch.map(node=>mapAniListNodeToTvdb(node,item.tvdbId)));
+      rows.filter(row=>row&&!mappedTvdbIds.has(row.id)).forEach(row=>{ mappedTvdbIds.add(row.id); mapped.push(row); });
+    }
+    const anilistGroup=mapped.length?[{id:'anilist-relations',name:'AniList branches and relations',items:mapped}]:[];
+    item.tvdbMeta={...(item.tvdbMeta||{}),anilistId:resolved.id,anilistMatchedTitle:resolved.title,anilistMatchYear:resolved.year,anilistRelatedSeries:anilistGroup,anilistCheckedAt:Date.now()};
+    item.tmdbMeta=item.tvdbMeta;
+    return item;
+  }catch(error){
+    console.warn('Optional AniList enrichment failed for',item.tvdbId,error);
+    return null;
+  }
+}
+
+function normalizedSearchText(value){
+  return String(value||'').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim();
+}
+function tvdbSearchRelevance(result,query){
+  const q=normalizedSearchText(query);
+  const title=normalizedSearchText(result.name);
+  const aliases=Array.isArray(result.aliases)?result.aliases.map(normalizedSearchText).filter(Boolean):[];
+  const qTokens=q.split(/\s+/).filter(Boolean);
+  const titleTokens=title.split(/\s+/).filter(Boolean);
+  let rank=0;
+  if(title===q) rank+=1000000;
+  else if(title.startsWith(q)) rank+=500000;
+  else if(title.includes(q)) rank+=250000;
+  if(aliases.some(alias=>alias===q)) rank+=180000;
+  else if(aliases.some(alias=>alias.includes(q))) rank+=70000;
+  const matched=qTokens.filter(token=>titleTokens.some(word=>word===token||word.startsWith(token))).length;
+  rank+=(matched/Math.max(1,qTokens.length))*50000;
+  const popularity=Number(result.searchScore);
+  if(Number.isFinite(popularity)&&popularity>0) rank+=Math.log10(popularity+1)*100;
+  rank-=Math.max(0,title.length-q.length)*.25;
+  return rank;
+}
+function rankTvdbSearchResults(results,query){
+  return results.map((result,index)=>({...result,_sourceOrder:index,_relevance:tvdbSearchRelevance(result,query)}))
+    .sort((a,b)=> b._relevance-a._relevance || a._sourceOrder-b._sourceOrder)
+    .map(({_sourceOrder,_relevance,...result})=>result);
+}
 async function searchTv(query){
-  const data = await tvdbFetch('/search', { query, type:'series', limit:'12' });
+  const data = await tvdbFetch('/search', { query, type:'series', limit:'6' });
   const raw = Array.isArray(data.data)? data.data: [];
   const mapped = raw.map(r=>{
     let numericId=null;
@@ -905,12 +1423,14 @@ async function searchTv(query){
     if(Array.isArray(r.genres) && r.genres.length) genresHint = r.genres.map(g=> typeof g==='string'? g : g.name).filter(Boolean);
     else if(Array.isArray(r.genre) && r.genre.length) genresHint = r.genre.map(g=> typeof g==='string'? g : g.name).filter(Boolean);
     const primaryType = r.primary_type || r.type || null;
+    const aliases = Array.isArray(r.aliases)? r.aliases.map(a=> typeof a==='string'?a:a?.name).filter(Boolean):[];
+    const searchScore = Number(r.score);
     let overview = '';
     if(r.overview && !hasJapanese(r.overview)) overview = r.overview;
     else if(r.overviewTranslations && r.overviewTranslations.eng) overview = r.overviewTranslations.eng;
-    return { id: numericId, name, poster_path: poster, overview: overview||'', genresHint, primaryType };
+    return { id: numericId, name, poster_path: poster, overview: overview||'', genresHint, primaryType, aliases, searchScore, year:readYear(r.year ?? r.firstAired ?? r.first_aired ?? r.firstAiredDate) };
   }).filter(Boolean);
-  return { results: mapped };
+  return { results: rankTvdbSearchResults(mapped,query) };
 }
 function tvdbSeriesToAnimeShape(tv){
   const seasons = (tv.seasons||[]).map(s=> ({ seasonNumber:s.seasonNumber, name:s.name, episodeCount:s.episodeCount||0, watched:false }));
@@ -927,6 +1447,14 @@ function tvdbSeriesToAnimeShape(tv){
     tmdbVoteCount: null,
     tmdbRatingCheckedAt: null,
     genres: tv.genres||[],
+    relatedSeries: normalizeRelatedSeries(tv.relatedSeries),
+    anilistId: normalizeAniListId(tv.anilistId),
+    anilistMatchedTitle: '',
+    anilistMatchYear: null,
+    anilistRelatedSeries: normalizeAniListRelatedSeries(tv.anilistRelatedSeries),
+    anilistCheckedAt: null,
+    firstAiredYear: readYear(tv.firstAiredYear ?? tv.firstAired ?? tv.year),
+    detailsPending: !!tv.detailsPending,
     tvdbRefreshedAt: Date.now(),
   };
   return {
@@ -940,15 +1468,59 @@ function tvdbSeriesToAnimeShape(tv){
     tmdbMeta: meta,
   };
 }
-async function getTvDetails(tvdbId){
-  const json = await tvdbFetch('/series/'+tvdbId+'/extended', {meta:'translations'});
-  const tv = json.data;
+function isOfficialTvdbList(list){
+  return !!list && (list.isOfficial===true || list.isOfficial===1 || String(list.isOfficial).toLowerCase()==='true');
+}
+function isGenericTvdbListName(name){
+  return /\b(top|best|greatest|popular|trending|favo?u?rites?|recommended|recommendations|must[- ]watch|all[- ]time|of the (year|month)|tvdb)\b/i.test(String(name||''));
+}
+async function fetchTvdbRelatedSeries(tv, currentId,{fresh=false}={}){
+  const listRefs=Array.isArray(tv?.lists)?tv.lists.filter(isOfficialTvdbList).slice(0,4):[];
+  const current=normalizeTvdbId(currentId);
+  const seen=new Set(current!=null?[current]:[]);
+  const groups=[];
+  for(const list of listRefs){
+    const listId=normalizeTvdbId(list.id);
+    if(listId==null) continue;
+    try{
+      const listData=await fetchTvdbListExtended(listId,{fresh});
+      if(!listData) continue;
+      const listName=String(listData.name||list.name||'').trim()||'TVDB franchise';
+      if(isGenericTvdbListName(listName)) continue;
+      const entities=Array.isArray(listData.entities)?listData.entities.slice().sort((a,b)=>(a.order??999999)-(b.order??999999)):[];
+      const ids=[];
+      for(const entity of entities){
+        const id=normalizeTvdbId(entity?.seriesId);
+        if(id!=null&&!seen.has(id)&&!ids.includes(id)) ids.push(id);
+      }
+      const loaded=await Promise.all(ids.slice(0,12).map(async id=>{
+        try{
+          const series=await fetchTvdbSeriesBase(id,{fresh});
+          if(!series||!series.id) return null;
+          const title=pickEnglishNameFromExtended(series);
+          if(!title) return null;
+          return { id, title, poster:series.image||null, year:series.year||'', status:series.status?.name||series.status||'' };
+        }catch(e){ console.warn('Could not load related TVDB series',id,e); return null; }
+      }));
+      const items=loaded.filter(item=>{
+        if(!item||seen.has(item.id)) return false;
+        seen.add(item.id);
+        return true;
+      });
+      if(items.length) groups.push({ id:listId, name:listName, items });
+    }catch(e){ console.warn('Could not load TVDB list',listId,e); }
+  }
+  return groups;
+}
+async function getTvDetails(tvdbId,{fast=false,fresh=false}={}){
+  const tv = await fetchTvdbSeriesExtended(tvdbId,{fresh});
   if(!tv || !tv.id) throw new Error('TVDB returned invalid data.');
   // Pick English title (avoid Japanese)
   const englishName = pickEnglishNameFromExtended(tv);
   // genres
   const genres = Array.isArray(tv.genres)? tv.genres.map(g=> typeof g==='string'? g: g.name).filter(Boolean):[];
   const overview = pickEnglishOverviewFromExtended(tv);
+  const relatedSeriesPromise=fast?Promise.resolve([]):fetchTvdbRelatedSeries(tv,tvdbId,{fresh}).catch(e=>{ console.warn('Related TVDB series lookup failed',e); return []; });
   // seasons — use English season name, fallback to "Season N" if Japanese
   let seasonsRaw = Array.isArray(tv.seasons)
     ? tv.seasons.filter(s=> s.number!==0 && s.type && s.type.type==='official').sort((a,b)=> a.number-b.number)
@@ -956,15 +1528,20 @@ async function getTvDetails(tvdbId){
   // The extended record often carries only "Aired Order"/"Season N" here.
   // Resolve generic names through the per-season English translation endpoint,
   // in small batches to avoid a burst of TVDB requests.
-  const seasonNames=[];
-  for(let i=0;i<seasonsRaw.length;i+=6){
-    const batch=seasonsRaw.slice(i,i+6);
-    seasonNames.push(...await Promise.all(batch.map(s=> fetchEnglishSeasonName(s))));
+  const seasonNames=fast
+    ? seasonsRaw.map(s=> seasonDisplayName(s,s.number))
+    : [];
+  if(!fast){
+    for(let i=0;i<seasonsRaw.length;i+=6){
+      const batch=seasonsRaw.slice(i,i+6);
+      seasonNames.push(...await Promise.all(batch.map(s=> fetchEnglishSeasonName(s))));
+    }
   }
-  let seasons = seasonsRaw.map((s,i)=> ({ seasonNumber:s.number, name:seasonNames[i] || seasonDisplayName(s, s.number), episodeCount:0, _rawId:s.id }));
+  let seasons = seasonsRaw.map((s,i)=> ({ seasonNumber:s.number, name:seasonNames[i] || seasonDisplayName(s, s.number), episodeCount:boundedInteger(s.episodeCount,0,10000,0), _rawId:s.id }));
   // Episode counts — robust pagination (query ?page= vs path /default/{page}) + dedup
-  try{
-    const epCounts={};
+  if(!fast){
+    try{
+      const epCounts={};
     const seenEpisodeIds=new Set();
     let page=0;
     let hasMore=true;
@@ -1044,13 +1621,15 @@ async function getTvDetails(tvdbId){
   }catch(e){
     console.warn('Episode count fallback', e);
   }
+  }
   // fallback if no seasons but we have counts
   if(!seasons.length){
     // try to infer from counts? keep empty
   }
   const status = tv.status?.name || tv.status || '';
   const runtime = tv.averageRuntime || tv.runtime || null;
-  return tvdbSeriesToAnimeShape({ id: tv.id, name: englishName, image: tv.image, genres, overview, seasons, numberOfSeasons: seasons.length, numberOfEpisodes: seasons.reduce((a,s)=>a+(s.episodeCount||0),0), status, runtime });
+  const relatedSeries=await relatedSeriesPromise;
+  return tvdbSeriesToAnimeShape({ id: tv.id, name: englishName, image: tv.image, genres, overview, seasons, numberOfSeasons: seasons.length, numberOfEpisodes: seasons.reduce((a,s)=>a+(s.episodeCount||0),0), status, runtime, year:readYear(tv.firstAired ?? tv.year), firstAiredYear:readYear(tv.firstAired ?? tv.year), anilistId:extractAniListRemoteId(tv), relatedSeries, detailsPending:fast });
 }
 async function testConnection(){
   // Will trigger login and a tiny search
@@ -1077,8 +1656,7 @@ async function isAnimatedForId(tvdbId){
     }
   }catch(e){}
   try{
-    const json = await tvdbFetch('/series/'+tvdbId+'/extended', {meta:'translations'});
-    const tv = json.data;
+    const tv = await fetchTvdbSeriesExtended(tvdbId);
     const genres = Array.isArray(tv.genres) ? tv.genres.map(g=> typeof g==='string'? g : g.name).filter(Boolean) : [];
     const isAnim = genres.some(g=> /^(animation|anime)$/i.test(String(g).trim()));
     animationCache.set(tvdbId, isAnim);
@@ -1092,63 +1670,39 @@ async function isAnimatedForId(tvdbId){
     return false;
   }
 }
-async function filterResultsByTab(results, tab, searchVer){
-  if(!results.length) return results;
-  // Use genre hint from search (if TVDB included it) to avoid extra fetches
+function resultMatchesTab(result,tab){
+  const isAnim=animationCache.get(result.id);
+  if(isAnim==null) return true; // render first; background verification may refine it
+  return tab==='anime' ? isAnim===true : isAnim===false;
+}
+function seedAnimationHints(results){
   results.forEach(r=>{
     if(animationCache.has(r.id)) return;
     if(Array.isArray(r.genresHint) && r.genresHint.length){
-      const isAnim = r.genresHint.some(g=> /^(animation|anime)$/i.test(String(g).trim()));
-      animationCache.set(r.id, isAnim);
-      persistAnimationCacheEntry(r.id, isAnim);
+      const isAnim=r.genresHint.some(g=> /^(animation|anime)$/i.test(String(g).trim()));
+      animationCache.set(r.id,isAnim);
+      persistAnimationCacheEntry(r.id,isAnim);
     }
   });
-  // Cap to 12 to bound API calls (was 20 → 12 to match search limit and avoid silent drop of 13-20)
-  const CAP = 12;
-  const sliceForVerify = results.slice(0, CAP);
-  const needed = sliceForVerify.filter(r=> !animationCache.has(r.id));
-  // Gentle concurrency: 6 at a time (TVDB stricter than TMDB)
-  for(let i=0;i<needed.length;i+=6){
-    const batch = needed.slice(i,i+6);
+}
+function filterResultsByTab(results,tab,searchVer){
+  if(!results.length) return results;
+  seedAnimationHints(results);
+  const initial=results.slice(0,6).filter(r=> resultMatchesTab(r,tab));
+  verifySearchGenresInBackground(results.slice(0,6),tab,searchVer);
+  return initial;
+}
+async function verifySearchGenresInBackground(results,tab,searchVer){
+  const needed=results.filter(r=> !animationCache.has(r.id));
+  for(let i=0;i<needed.length;i+=4){
+    const batch=needed.slice(i,i+4);
     await Promise.all(batch.map(r=> isAnimatedForId(r.id)));
-    if(typeof searchVer==='number' && searchVer!==searchRequestVersion) return []; // aborted — caller checks version
-    // Progressive update: if this search is still current, show intermediate results
-    if(typeof searchVer==='number' && searchVer===searchRequestVersion && i+6 < needed.length){
-      const interimFiltered = results.filter(r=>{
-        // Only include those we have decided so far; hide undecided yet
-        if(!animationCache.has(r.id)) return false;
-        const isAnim = animationCache.get(r.id);
-        return tab==='anime' ? isAnim===true : isAnim===false;
-      });
-      // Update UI progressively (keep spinner)
-      if(interimFiltered.length || i===0){
-        state.searchResults = interimFiltered;
-        // Don't hide spinner yet, but show partial results underneath
-        const area = document.getElementById('search-results-area');
-        if(area){
-          // Render partial inline without clearing loading flag
-          const prevLoading = state.searchLoading;
-          state.searchLoading = false;
-          area.innerHTML = renderSearchResultsBody();
-          // restore loading state for outer logic to manage
-          state.searchLoading = prevLoading;
-          area.querySelectorAll('[data-preview]').forEach(el=> el.addEventListener('click',()=> openPreview(Number(el.getAttribute('data-preview')))));
-          // Show a small progress hint
-          const hint = document.createElement('div');
-          hint.className='search-hint';
-          hint.style.paddingTop='4px';
-          hint.textContent = `Checking ${needed.length - (i+6) } more…`;
-          area.appendChild(hint);
-        }
-      }
+    if(typeof searchVer==='number' && searchVer!==searchRequestVersion) return;
+    if(typeof searchVer==='number' && searchVer===searchRequestVersion){
+      state.searchResults=results.filter(r=> resultMatchesTab(r,tab));
+      updateSearchResults();
     }
   }
-  return results.filter((r, idx)=>{
-    if(idx >= CAP && !animationCache.has(r.id)) return false; // beyond cap, no hint → exclude to bound API calls
-    const isAnim = animationCache.get(r.id);
-    if(isAnim==null) return false;
-    return tab==='anime' ? isAnim===true : isAnim===false;
-  });
 }
 
 /* ---------- Images ---------- */
@@ -1335,7 +1889,7 @@ function renderSearchResultsBody(){
     const isAnimeTab = state.activeTab==='anime';
     return `<div class="search-hint">No ${isAnimeTab ? 'animated' : 'live-action'} results for “${escapeHtml(state.searchQuery)}”.<br><span style="opacity:.85;">${isAnimeTab ? 'Try the <b>Series</b> tab for live-action shows, or check the spelling.' : 'Try the <b>Anime</b> tab for Animation / Anime series.'}</span></div>`;
   }
-  const cards=state.searchResults.map(r=>{
+  const cards=state.searchResults.slice(0,6).map(r=>{
     const owned=activeLibrary().find(a=> a.tvdbId===r.id || a.tmdbId===r.id);
     const ownedStatus=owned? activeStatusMap()[owned.status]:null;
     return `<button class="search-card" data-preview="${escapeHtml(r.id)}">
@@ -1344,7 +1898,7 @@ function renderSearchResultsBody(){
         ${owned&&ownedStatus?`<div class="search-card-owned">${ownedStatus.emoji} In library</div>`:''}
       </button>`;
   }).join('');
-  return `<div class="search-grid">${cards}</div>`;
+  return `<div class="search-primary-label">Top TVDB matches</div><div class="search-grid">${cards}</div><div class="search-primary-note">Open a result to see official related series and add it or one of its related titles to your library.</div>`;
 }
 function updateSearchResults(){
   const area=document.getElementById('search-results-area');
@@ -1380,12 +1934,45 @@ function tvdbRefreshMarkup(meta){
   if(Number.isNaN(d.getTime())) return '';
   return `<div class="tvdb-refresh-time">Last TVDB refresh: ${escapeHtml(d.toLocaleString(undefined,{year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true}))}</div>`;
 }
+function anilistRelationDescription(item,currentTitle){
+  const relation=String(item&&item.relationType||'').toUpperCase();
+  const source=normalizeText(item&&item.relatedVia,MAX_LIBRARY_TITLE_LENGTH)||normalizeText(currentTitle,MAX_LIBRARY_TITLE_LENGTH)||'this title';
+  const phrases={
+    PREQUEL:'Prequel to',
+    SEQUEL:'Sequel to',
+    SIDE_STORY:'Side story of',
+    SPIN_OFF:'Spin-off of',
+    PARENT:'Parent of',
+    ALTERNATIVE:'Alternative to',
+  };
+  const phrase=phrases[relation]||normalizeText(item&&item.relationLabel,50)||'Related to';
+  return phrase+' '+source;
+}
+function tvdbRelatedSeriesMarkup(meta,mediaType='show',currentTitle='',anilistLoading=false){
+  const tvdbGroups=meta&&Array.isArray(meta.relatedSeries)?meta.relatedSeries:[];
+  const anilistGroups=mediaType==='anime'&&meta&&Array.isArray(meta.anilistRelatedSeries)?meta.anilistRelatedSeries:[];
+  const loading=mediaType==='anime'&&anilistLoading;
+  const groups=[...anilistGroups,...tvdbGroups];
+  if(!groups.length&&!loading) return '';
+  const groupMarkup=groups.map(group=>`<div class="related-series-group"><div class="related-series-list-name">${escapeHtml(group.name)}</div><div class="related-series-grid">${group.items.map(item=>{
+    const relationText=item.relationLabel?anilistRelationDescription(item,currentTitle):'';
+    const metaText=[relationText,item.year,item.status].filter(Boolean).join(' · ');
+    return `<button class="related-series-card" type="button" data-related-preview="${escapeHtml(item.id)}" title="Open ${escapeHtml(item.title)}">
+    <img class="related-series-poster" src="${posterSrc(item.poster)}" alt="">
+    <span class="related-series-name">${escapeHtml(item.title)}</span>${metaText?`<span class="related-series-meta">${escapeHtml(metaText)}</span>`:''}
+  </button>`;
+  }).join('')}</div></div>`).join('');
+  const hasAniList=anilistGroups.length||loading;
+  const subtitle=hasAniList&&tvdbGroups.length?'Official TVDB universe lists plus AniList branches and relations':hasAniList?'AniList branches and relations':'Official TVDB universe lists';
+  const loadingMarkup=loading?'<div class="related-series-loading"><span class="spinner">🌀</span><span>Loading AniList branches…</span></div>':'';
+  return `<section class="related-series" aria-label="In this universe"><h2 class="related-series-title">In this universe</h2><p class="related-series-subtitle">${subtitle}</p>${loadingMarkup}${groupMarkup}</section>`;
+}
 function renderDetail(){
   if(state.detailLoading) return `<div class="view-head"><button class="back-btn" data-go="${state.previewMode?'search':'home'}">← Back</button></div><div class="loading-block"><div class="spinner">🌀</div><div>Loading from TVDB…</div></div>`;
   const lib=activeLibrary(), map=activeStatusMap(), a=state.previewMode? state.previewTvdb: lib.find(x=>x.id===state.detailId);
   if(!a) return `<div class="view-head"><button class="back-btn" data-go="home">← Back</button></div><div class="empty-block"><div class="empty-title">Not found</div></div>`;
-  const seasons=a.seasons||[], total=seasons.reduce((n,x)=> n+(x.episodeCount||0),0);
-  const seasonRows=seasons.map((x,i)=>renderSeasonRow(x,i)).join('')||`<div class="status-empty">No season data from TVDB.</div>`;
+  const seasons=a.seasons||[], detailsPending=!!(a.tvdbMeta&&a.tvdbMeta.detailsPending), total=seasons.reduce((n,x)=> n+(x.episodeCount||0),0);
+  const seasonRows=seasons.map((x,i)=>renderSeasonRow(x,i,detailsPending)).join('')||`<div class="status-empty">No season data from TVDB.</div>`;
   const owned=state.previewMode? lib.find(x=> String(x.tvdbId)===String(a.tvdbId)) : null;
   const tvdbStatusValue=a.tvdbMeta&&a.tvdbMeta.tvdbStatus?String(a.tvdbMeta.tvdbStatus).trim():'Unknown';
   const tvdbStatusSignature=`<span class="tvdb-status-signature" title="TVDB status" aria-label="TVDB status: ${escapeHtml(tvdbStatusValue)}">TVDB status: ${escapeHtml(tvdbStatusValue)}</span>`;
@@ -1401,14 +1988,17 @@ function renderDetail(){
   const tvdbTools = (link||refreshButton) ? `<div class="tvdb-detail-tools">${link}${refreshButton}</div>` : '';
   const del = !state.previewMode? `<div style="display:flex;justify-content:center;padding:6px 4px 10px;"><button class="btn btn-danger btn-sm" data-delete-anime="1">🗑️ Remove from library</button></div>` : '';
   const refresh = !state.previewMode? tvdbRefreshMarkup(a.tvdbMeta||a.tmdbMeta) : '';
+  const anilistLoading=state.activeTab==='anime'&&String(state.anilistLoadingTvdbId)===String(a.tvdbId)&&!a.tvdbMeta?.anilistCheckedAt;
+  const related = tvdbRelatedSeriesMarkup(a.tvdbMeta||a.tmdbMeta,a.mediaType,a.title,anilistLoading);
   return `<div class="view-head"><button class="back-btn" data-go="${state.previewMode?'search':'home'}">← Back</button></div>
     <div class="detail-hero"><h1 class="detail-title">${escapeHtml(a.title)}</h1><div class="detail-poster-wrap"><img class="detail-poster" src="${posterSrc(a.poster)}" alt="">${tvdbStatusSignature}</div>
-    <div class="detail-stats"><b>${seasons.length}</b>&nbsp;seasons&nbsp;&nbsp;·&nbsp;&nbsp;<b>${total}</b>&nbsp;episodes</div>${genres}${description}</div>
-    ${actions}<div class="section-label">Seasons</div><div id="season-list">${seasonRows}</div>${del}${refresh}${tvdbTools}`;
+    <div class="detail-stats"><b>${seasons.length}</b>&nbsp;seasons&nbsp;&nbsp;·&nbsp;&nbsp;<b>${detailsPending?'…':total}</b>&nbsp;episodes</div>${genres}${description}</div>
+    ${actions}<div class="section-label">Seasons</div><div id="season-list">${seasonRows}</div>${del}${refresh}${tvdbTools}${related}`;
 }
-function renderSeasonRow(s, idx){
+function renderSeasonRow(s, idx, detailsPending=false){
   const checked=!!s.watched;
-  return `<div class="season-row"><button class="season-head" data-toggle-watched="${idx}"><span class="season-check ${checked?'checked':''}">${checked?'✓':''}</span><span class="season-name">${escapeHtml(s.name)} <span style="color:var(--muted); font-weight:500;">· ${s.episodeCount} ep</span></span></button></div>`;
+  const episodeCount=detailsPending?'…':s.episodeCount;
+  return `<div class="season-row"><button class="season-head" data-toggle-watched="${idx}"><span class="season-check ${checked?'checked':''}">${checked?'✓':''}</span><span class="season-name">${escapeHtml(s.name)} <span style="color:var(--muted); font-weight:500;">· ${episodeCount} ep</span></span></button></div>`;
 }
 function renderSettings(){
   const swatches=ACCENTS.map(c=> `<button class="swatch ${state.settings.accent===c?'active':''}" style="background:${c}" data-accent="${c}"></button>`).join('');
@@ -1496,12 +2086,13 @@ function restoreScrollPosition(scrollY){
 async function goHome(){
   const saved= state.view==='detail'&&!state.previewMode? state.homeScrollY:null;
   state.homeScrollY=null;
+  state.anilistLoadingTvdbId=null;
   state.view='home'; state.previewMode=false; render();
   restoreScrollPosition(saved);
 }
-function goSettings(){ state.homeScrollY=null; state.view='settings'; render(); }
+function goSettings(){ state.homeScrollY=null; state.anilistLoadingTvdbId=null; state.view='settings'; render(); }
 function resetSearchState(){ clearTimeout(searchDebounce); searchRequestVersion+=1; state.searchQuery=''; state.searchResults=[]; state.searchLoading=false; state.searchError=''; }
-function goSearch({fresh=true}={}){ if(fresh) resetSearchState(); state.view='search'; render(); setTimeout(()=>{ const i=document.getElementById('search-input'); if(i){ i.focus(); i.setSelectionRange(i.value.length,i.value.length);} },0); }
+function goSearch({fresh=true}={}){ if(fresh) resetSearchState(); state.anilistLoadingTvdbId=null; state.view='search'; render(); setTimeout(()=>{ const i=document.getElementById('search-input'); if(i){ i.focus(); i.setSelectionRange(i.value.length,i.value.length);} },0); }
 
 let searchDebounce=null;
 let searchRequestVersion=0;
@@ -1535,20 +2126,68 @@ async function openPreview(tvdbId){
   const safe=normalizeTvdbId(tvdbId);
   if(!safe){ showToast('Invalid TVDB id.'); return; }
   state.view='detail'; state.previewMode=true; state.detailLoading=true; render();
+  let preview=null;
   try{
-    const tv=await getTvDetails(safe);
-    const preview=normalizeLibraryItem(tv, state.activeTab==='anime'?'anime':'show');
+    const tv=await getTvDetails(safe,{fast:true});
+    preview=normalizeLibraryItem(tv, state.activeTab==='anime'?'anime':'show');
     if(!preview) throw new Error('TVDB returned invalid data.');
     state.previewTvdb=preview;
-  }catch(err){ showToast(err.message||'Could not load details.'); state.view='search'; state.previewMode=false; render(); return; }
+  }catch(err){ showToast(err.message||'Could not load details.'); state.anilistLoadingTvdbId=null; state.view='search'; state.previewMode=false; render(); return; }
+  const shouldLoadAniList=state.activeTab==='anime';
+  state.anilistLoadingTvdbId=shouldLoadAniList?safe:null;
   state.detailLoading=false; render();
+  // Optional AniList enrichment is deliberately started after the fast TVDB
+  // Details page is visible. It can never block TVDB metadata or first paint.
+  if(shouldLoadAniList){
+    enrichAniListRelations(preview).then(enriched=>{
+      if(enriched && state.view==='detail' && state.previewMode && state.previewTvdb && String(state.previewTvdb.tvdbId)===String(safe)){
+        const aniMeta=preview.tvdbMeta||enriched.tvdbMeta||{};
+        const currentMeta=state.previewTvdb.tvdbMeta||{};
+        state.previewTvdb.tvdbMeta={...currentMeta,anilistId:aniMeta.anilistId||currentMeta.anilistId,anilistMatchedTitle:aniMeta.anilistMatchedTitle||'',anilistMatchYear:aniMeta.anilistMatchYear||null,anilistRelatedSeries:aniMeta.anilistRelatedSeries||[],anilistCheckedAt:aniMeta.anilistCheckedAt||null};
+        state.previewTvdb.tmdbMeta=state.previewTvdb.tvdbMeta;
+      }
+    }).finally(()=>{
+      if(String(state.anilistLoadingTvdbId)===String(safe)){
+        state.anilistLoadingTvdbId=null;
+        if(state.view==='detail' && state.previewMode && state.previewTvdb && String(state.previewTvdb.tvdbId)===String(safe)) render();
+      }
+    });
+  }
+  // Enrich after the first paint: season translations, episode counts, and
+  // related-series cards should not block the usable Details page.
+  getTvDetails(safe).then(full=>{
+    const enriched=normalizeLibraryItem(full, state.activeTab==='anime'?'anime':'show');
+    if(!enriched) return;
+    if(state.view==='detail' && state.previewMode && state.previewTvdb && String(state.previewTvdb.tvdbId)===String(safe)){
+      const oldMeta=state.previewTvdb.tvdbMeta||{};
+      enriched.tvdbMeta={...enriched.tvdbMeta,anilistId:oldMeta.anilistId||enriched.tvdbMeta.anilistId,anilistMatchedTitle:oldMeta.anilistMatchedTitle||'',anilistMatchYear:oldMeta.anilistMatchYear||null,anilistRelatedSeries:oldMeta.anilistRelatedSeries||[],anilistCheckedAt:oldMeta.anilistCheckedAt||null};
+      enriched.tmdbMeta=enriched.tvdbMeta;
+      state.previewTvdb=enriched;
+      render();
+    }
+  }).catch(e=> console.warn('TVDB detail enrichment failed for',safe,e));
 }
 async function openDetail(localId){
   if(state.view==='home') state.homeScrollY=window.scrollY;
   const item=activeLibrary().find(v=> v.id===localId);
+  const shouldLoadAniList=!!(item&&state.activeTab==='anime'&&!item.tvdbMeta?.anilistCheckedAt);
+  state.anilistLoadingTvdbId=shouldLoadAniList?item.tvdbId:null;
   state.view='detail'; state.previewMode=false; state.detailId=localId;
   if(item) markTitleUpdatesSeen(item);
   render();
+  if(item && state.activeTab==='anime'){
+    enrichAniListRelations(item).then(enriched=>{
+      if(enriched && state.view==='detail' && !state.previewMode && state.detailId===localId && state.activeTab==='anime'){
+        saveItem(enriched).catch(error=>console.warn('Could not cache AniList relations',error));
+        render();
+      }
+    }).finally(()=>{
+      if(String(state.anilistLoadingTvdbId)===String(item.tvdbId)){
+        state.anilistLoadingTvdbId=null;
+        if(state.view==='detail' && !state.previewMode && state.detailId===localId && state.activeTab==='anime') render();
+      }
+    });
+  }
 }
 async function addPreviewToLibrary(){
   const src=state.previewTvdb; if(!src) return;
@@ -1557,7 +2196,14 @@ async function addPreviewToLibrary(){
   openSheet(`<div class="sheet-grip"></div><div class="sheet-title">Add “${escapeHtml(src.title)}” as…</div>${activeStatuses().map(st=>`<button class="status-choice status-${st.key}" data-add-with-status="${st.key}"><span class="status-dot"></span> ${st.label} ${st.emoji}</button>`).join('')}`);
 }
 async function confirmAddWithStatus(statusKey){
-  const src=state.previewTvdb, map=activeStatusMap(); if(!src||!map[statusKey]) return;
+  let src=state.previewTvdb, map=activeStatusMap(); if(!src||!map[statusKey]) return;
+  if(src.tvdbMeta?.detailsPending){
+    try{
+      const full=await getTvDetails(src.tvdbId);
+      const enriched=normalizeLibraryItem(full, state.activeTab==='anime'?'anime':'show');
+      if(enriched){ state.previewTvdb=enriched; src=enriched; }
+    }catch(e){ console.warn('Could not finish TVDB detail enrichment before add',e); }
+  }
   const item=normalizeLibraryItem({ tvdbId:src.tvdbId, title:src.title, poster:src.poster, backdrop:src.backdrop, status:statusKey, rating:null, seasons:src.seasons, tvdbMeta:src.tvdbMeta, addedAt:Date.now(), updatedAt:Date.now() }, state.activeTab==='anime'?'anime':'show');
   if(!item){ showToast('Could not add.'); return; }
   item.tmdbMeta=item.tvdbMeta;
@@ -1683,7 +2329,7 @@ async function importLibrary(file){
 async function clearAllData(){
   if(!confirm('Clear all data? This deletes your library, settings and notifications from this browser. Export first if you want a backup.')) return;
   const db=await getDB();
-  const stores=['anime','series','notifications','profile','animationCache'];
+  const stores=['anime','series','notifications','profile','animationCache','tvdbCache'];
   await Promise.all(stores.map(s=> new Promise((res,rej)=>{ 
     try{
       const tx=db.transaction(s,'readwrite'); tx.objectStore(s).clear(); tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error);
@@ -1691,6 +2337,11 @@ async function clearAllData(){
   })));
   state.library=[]; state.showLibrary=[]; state.notifications=[];
   animationCache.clear();
+  anilistMappingCache.clear();
+  anilistRelationsCache.clear();
+  tvdbExtendedCache.clear();
+  tvdbBaseCache.clear();
+  tvdbListCache.clear();
   state.settings={ tvdbApiKey:'', tvdbPin:'', theme:'dark', accent:ACCENTS[0], displayName:'', photoURL:'', showLibraryRatings:false };
   tvdbToken=null; applyTheme(); showToast('Data cleared.'); render();
 }
@@ -1703,7 +2354,7 @@ async function refreshCurrentTitle(){
   state.refreshingTitleId=current.id;
   render();
   try{
-    const tv=await getTvDetails(current.tvdbId);
+    const tv=await getTvDetails(current.tvdbId,{fresh:true});
     const prev=current.tvdbMeta||{};
     const freshMeta=tv.tvdbMeta||{};
     const hasFreshSeasons=Array.isArray(tv.seasons)&&tv.seasons.length>0;
@@ -1730,6 +2381,8 @@ async function refreshCurrentTitle(){
       episodeRuntime:freshMeta.episodeRuntime,
       overview:freshMeta.overview,
       genres:freshMeta.genres,
+      relatedSeries:freshMeta.relatedSeries,
+      detailsPending:false,
       tvdbRefreshedAt:Date.now(),
     };
     current.tmdbMeta=current.tvdbMeta;
@@ -1753,7 +2406,7 @@ async function refreshCurrentTitle(){
 function wireViewEvents(){
   const main=document.getElementById('main');
   main.querySelectorAll('[data-media-tab]').forEach(el=> el.addEventListener('click',()=>{
-    state.activeTab=el.getAttribute('data-media-tab'); state.expandedStatus=null; state.view='home'; state.previewMode=false; state.searchQuery=''; state.searchResults=[]; render();
+    state.activeTab=el.getAttribute('data-media-tab'); state.expandedStatus=null; state.view='home'; state.previewMode=false; state.anilistLoadingTvdbId=null; state.searchQuery=''; state.searchResults=[]; render();
   }));
   const sortSelect=document.getElementById('sort-select');
   if(sortSelect) sortSelect.addEventListener('change',()=>{ const k=state.activeTab==='anime'?'anime':'shows'; state.sortBy[k]=sortSelect.value; render(); });
@@ -1766,6 +2419,7 @@ function wireViewEvents(){
   const searchInput=document.getElementById('search-input');
   if(searchInput) searchInput.addEventListener('input', e=> onSearchInput(e.target.value));
   main.querySelectorAll('[data-preview]').forEach(el=> el.addEventListener('click',()=> openPreview(Number(el.getAttribute('data-preview')))));
+  main.querySelectorAll('[data-related-preview]').forEach(el=> el.addEventListener('click',()=> openPreview(Number(el.getAttribute('data-related-preview')))));
   main.querySelectorAll('[data-toggle-watched]').forEach(el=> el.addEventListener('click',()=> toggleSeasonWatched(Number(el.getAttribute('data-toggle-watched')))));
   const descriptionToggle=main.querySelector('[data-description-toggle]');
   if(descriptionToggle) descriptionToggle.addEventListener('click',()=>{
