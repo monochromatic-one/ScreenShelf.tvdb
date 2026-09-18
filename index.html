@@ -197,9 +197,10 @@
   .detail-description.expanded{ display:block; }
   .detail-description-toggle{ margin-top:4px; padding:0; border:0; background:none; color:var(--accent); font-size:12px; font-weight:800; }
   .detail-description-toggle:hover{ text-decoration:underline; }
-  .tvdb-score{ display:flex; align-items:center; justify-content:center; gap:5px; margin-top:9px; font-size:12px; color:var(--muted); font-weight:700; }
-  .tvdb-score-mark{ color:#2b6cb0; font-size:10px; font-weight:900; letter-spacing:-.35px; }
-  .detail-tvdb-status{ margin-top:9px; font-size:12.5px; color:var(--muted); }
+  .tvdb-status-signature{ position:absolute; left:calc(100% + 10px); top:50%; z-index:1; width:155px; max-width:155px; color:var(--accent); font-family:"Segoe Print","Bradley Hand",cursive; font-size:16.5px; font-style:italic; font-weight:800; letter-spacing:.015em; line-height:1.15; text-align:left; white-space:normal; transform:translateY(-50%) rotate(-12deg); transform-origin:left center; pointer-events:none; text-shadow:0 1px 0 color-mix(in srgb, var(--bg) 75%, transparent); }
+  @media (max-width:420px){
+    .tvdb-status-signature{ left:calc(100% + 8px); width:115px; max-width:115px; font-size:15px; }
+  }
   .detail-actions{ padding:8px 4px 22px; display:flex; flex-direction:column; gap:10px; }
   .status-pill{
     display:inline-flex; align-items:center; gap:7px; font-size:12.5px; font-weight:700; padding:7px 13px 7px 10px;
@@ -459,7 +460,7 @@ const state = {
   library: [],
   showLibrary: [],
   activeTab: 'shows',
-  settings: { tvdbApiKey:'', tvdbPin:'', tmdbApiKey:'', theme:'dark', accent: ACCENTS[0], displayName:'', photoURL:'', showLibraryRatings:false },
+  settings: { tvdbApiKey:'', tvdbPin:'', theme:'dark', accent: ACCENTS[0], displayName:'', photoURL:'', showLibraryRatings:false },
   editingProfileName: false,
   avatarUploading: false,
   avatarError: '',
@@ -491,7 +492,7 @@ function escapeHtml(s){
    IndexedDB — single source of truth (replaces Firestore)
 ========================================================= */
 const DB_NAME = 'screenshelf-tvdb-local';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 let dbPromise = null;
 function getDB(){
   if(dbPromise) return dbPromise;
@@ -505,9 +506,9 @@ function getDB(){
       if(!db.objectStoreNames.contains('series')) db.createObjectStore('series',{keyPath:'id'});
       if(!db.objectStoreNames.contains('notifications')) db.createObjectStore('notifications',{keyPath:'id'});
       if(!db.objectStoreNames.contains('animationCache')) db.createObjectStore('animationCache',{keyPath:'id'});
-      if(!db.objectStoreNames.contains('tmdbRatingCache')) db.createObjectStore('tmdbRatingCache',{keyPath:'id'});
       if(oldVersion<4 && db.objectStoreNames.contains('companionMovies')) db.deleteObjectStore('companionMovies');
-      // v1 -> v2/v3/v4 migrations happen automatically (new stores are created and retired stores are removed)
+      if(oldVersion<5 && db.objectStoreNames.contains('tmdbRatingCache')) db.deleteObjectStore('tmdbRatingCache');
+      // v1 -> v2/v3/v4/v5 migrations happen automatically (new stores are created and retired stores are removed)
     };
     req.onsuccess = ()=> resolve(req.result);
     req.onerror = ()=> reject(req.error);
@@ -704,13 +705,7 @@ function normalizeLibraryItem(value, mediaType){
   const statusMap = type==='show'? SHOW_STATUS_MAP: STATUS_MAP;
   const seasons = Array.isArray(value.seasons)? value.seasons.slice(0,100).map(normalizeSeason).filter(Boolean):[];
   const meta = value.tvdbMeta || value.tmdbMeta || {};
-  // TVDB's score is a popularity/sort hint, not a 0–10 rating. Only accept
-  // a TMDB average when a TMDB vote count is present (old TVDB-derived values
-  // had no vote count and must not reappear as a rating badge).
-  const rawTmdbVoteAverage = typeof meta.tmdbVoteAverage==='number' && Number.isFinite(meta.tmdbVoteAverage) && meta.tmdbVoteAverage>=0 && meta.tmdbVoteAverage<=10 ? meta.tmdbVoteAverage : null;
-  const rawTmdbVoteCount = boundedInteger(meta.tmdbVoteCount,0,2147483647,null);
-  const tmdbVoteAverage = rawTmdbVoteAverage!=null && rawTmdbVoteCount!=null ? rawTmdbVoteAverage : null;
-  const tmdbVoteCount = tmdbVoteAverage!=null ? rawTmdbVoteCount : null;
+  // Keep legacy TMDB rating fields null for schema/backup compatibility; ratings are no longer fetched or displayed.
   return {
     id: String(tvdbId),
     tvdbId,
@@ -730,9 +725,9 @@ function normalizeLibraryItem(value, mediaType){
       episodeRuntime: boundedInteger(meta.episodeRuntime,1,1440,null),
       overview: normalizeText(meta.overview||meta.description||'',MAX_OVERVIEW_LENGTH),
       score: null,
-      tmdbVoteAverage,
-      tmdbVoteCount,
-      tmdbRatingCheckedAt: boundedInteger(meta.tmdbRatingCheckedAt,0,4102444800000,null),
+      tmdbVoteAverage: null,
+      tmdbVoteCount: null,
+      tmdbRatingCheckedAt: null,
       genres: normalizeTvdbGenres(meta.genres),
       tvdbRefreshedAt: boundedInteger(meta.tvdbRefreshedAt||meta.tmdbRefreshedAt,0,4102444800000,null),
     },
@@ -749,13 +744,12 @@ function denormalizeForStorage(item){
 
 /* ---------- Local persistence helpers ---------- */
 async function loadFromDB(){
-  const [profile, animeRows, seriesRows, notifRows, animCacheRows, tmdbRatingRows] = await Promise.all([
+  const [profile, animeRows, seriesRows, notifRows, animCacheRows] = await Promise.all([
     idbGet('profile','settings'),
     idbGetAll('anime'),
     idbGetAll('series'),
     idbGetAll('notifications'),
     idbGetAll('animationCache').catch(()=>[]),
-    idbGetAll('tmdbRatingCache').catch(()=>[]),
   ]);
   // Restore persisted animation genres cache (speeds up search filtering)
   try{
@@ -769,23 +763,9 @@ async function loadFromDB(){
       });
     }
   }catch(e){ console.warn('Could not restore animation cache', e); }
-  // Restore cached TMDB ratings. Null averages are retained as a cached no-match
-  // so an unrecognized title is not requested on every render.
-  try{
-    if(Array.isArray(tmdbRatingRows)){
-      tmdbRatingRows.forEach(row=>{
-        const id=normalizeTvdbId(row&&row.id);
-        const checkedAt=typeof row?.checkedAt==='number'?row.checkedAt:0;
-        const voteAverage=typeof row?.voteAverage==='number'&&Number.isFinite(row.voteAverage)&&row.voteAverage>=0&&row.voteAverage<=10 ? row.voteAverage:null;
-        const voteCount=boundedInteger(row?.voteCount,0,2147483647,null);
-        if(id!=null && checkedAt>0) tmdbRatingCache.set(id,{id,voteAverage,voteCount,checkedAt});
-      });
-    }
-  }catch(e){ console.warn('Could not restore TMDB rating cache', e); }
   if(profile){
     if(typeof profile.tvdbApiKey==='string') state.settings.tvdbApiKey = profile.tvdbApiKey;
     if(typeof profile.tvdbPin==='string') state.settings.tvdbPin = profile.tvdbPin;
-    if(typeof profile.tmdbApiKey==='string') state.settings.tmdbApiKey = profile.tmdbApiKey;
     if(typeof profile.theme==='string') state.settings.theme = profile.theme;
     if(typeof profile.accent==='string') state.settings.accent = profile.accent;
     if(typeof profile.displayName==='string') state.settings.displayName = profile.displayName;
@@ -870,27 +850,6 @@ function applyTheme(){
 let tvdbToken=null;
 let tvdbTokenExpiresAt=0;
 function hasApiKey(){ return !!(state.settings.tvdbApiKey && state.settings.tvdbApiKey.trim()); }
-function hasTmdbApiKey(){ return !!(state.settings.tmdbApiKey && state.settings.tmdbApiKey.trim()); }
-
-// Optional TMDB lookup used only for a real 0–10 rating. TVDB remains the
-// source for titles, metadata, seasons, and episode counts.
-async function fetchTmdbRating(tvdbId){
-  if(!hasTmdbApiKey()) return null;
-  const id=normalizeTvdbId(tvdbId);
-  if(id==null) return null;
-  const url = `https://api.themoviedb.org/3/find/${id}?external_source=tvdb_id&api_key=${encodeURIComponent(state.settings.tmdbApiKey.trim())}`;
-  let res;
-  try{ res=await fetch(url,{cache:'no-store'}); }catch(e){ return null; }
-  if(!res.ok) return null;
-  let json;
-  try{ json=await res.json(); }catch(e){ return null; }
-  const hit=json.tv_results?.[0];
-  if(!hit) return null;
-  const voteAverage=typeof hit.vote_average==='number'? hit.vote_average:Number(hit.vote_average);
-  const voteCount=typeof hit.vote_count==='number'? hit.vote_count:Number(hit.vote_count);
-  if(!Number.isFinite(voteAverage)||voteAverage<0||voteAverage>10||!Number.isFinite(voteCount)||voteCount<0) return null;
-  return { voteAverage, voteCount: Math.floor(voteCount) };
-}
 async function tvdbLogin(){
   if(!hasApiKey()){ const e=new Error('No TVDB API key configured.'); e.code='NO_KEY'; throw e; }
   const body={ apikey: state.settings.tvdbApiKey.trim() };
@@ -962,7 +921,7 @@ function tvdbSeriesToAnimeShape(tv){
     tmdbStatus: tv.status||'',
     episodeRuntime: tv.runtime||null,
     overview: normalizeText(tv.overview,MAX_OVERVIEW_LENGTH),
-    // TVDB score is not a rating; TMDB rating fields are populated separately.
+    // Legacy rating fields remain empty for backup/schema compatibility; ratings are not fetched or displayed.
     score: null,
     tmdbVoteAverage: null,
     tmdbVoteCount: null,
@@ -1097,67 +1056,6 @@ async function testConnection(){
   // Will trigger login and a tiny search
   await tvdbLogin();
   await tvdbFetch('/search', { query:'a', type:'series', limit:'1' });
-}
-
-/* ---------- Optional TMDB rating cache ---------- */
-// Cache rows: {id: tvdbId, voteAverage, voteCount, checkedAt} — memory + IndexedDB
-const TMDB_RATING_CACHE_TTL = 30*24*60*60*1000;
-const tmdbRatingCache = new Map();
-function cachedTmdbRatingValue(row){
-  if(!row || typeof row.checkedAt!=='number' || Date.now()-row.checkedAt>=TMDB_RATING_CACHE_TTL) return undefined;
-  if(typeof row.voteAverage!=='number' || !Number.isFinite(row.voteAverage) || row.voteAverage<0 || row.voteAverage>10) return null;
-  const voteCount=boundedInteger(row.voteCount,0,2147483647,null);
-  if(voteCount==null) return null;
-  return { voteAverage: row.voteAverage, voteCount };
-}
-async function persistTmdbRatingCacheEntry(tvdbId, rating, checkedAt=Date.now()){
-  const id=normalizeTvdbId(tvdbId);
-  if(id==null) return;
-  const row={
-    id,
-    voteAverage: rating && typeof rating.voteAverage==='number' && Number.isFinite(rating.voteAverage) && rating.voteAverage>=0 && rating.voteAverage<=10 ? rating.voteAverage : null,
-    voteCount: rating && typeof rating.voteCount==='number' && Number.isFinite(rating.voteCount) && rating.voteCount>=0 ? Math.floor(rating.voteCount) : null,
-    checkedAt,
-  };
-  tmdbRatingCache.set(id,row);
-  try{ await idbPut('tmdbRatingCache', row); }
-  catch(e){ console.warn('Could not persist TMDB rating cache', e); }
-}
-async function getCachedTmdbRating(tvdbId){
-  if(!hasTmdbApiKey()) return { rating:null, checkedAt:null };
-  const id=normalizeTvdbId(tvdbId);
-  if(id==null) return { rating:null, checkedAt:null };
-  let row=tmdbRatingCache.get(id);
-  let cached=cachedTmdbRatingValue(row);
-  if(cached!==undefined) return { rating:cached, checkedAt:row.checkedAt };
-  if(!row){
-    try{
-      row=await idbGet('tmdbRatingCache', id);
-      if(row) tmdbRatingCache.set(id,row);
-      cached=cachedTmdbRatingValue(row);
-      if(cached!==undefined) return { rating:cached, checkedAt:row.checkedAt };
-    }catch(e){}
-  }
-  const checkedAt=Date.now();
-  const rating=await fetchTmdbRating(id);
-  await persistTmdbRatingCacheEntry(id,rating,checkedAt);
-  return { rating, checkedAt };
-}
-async function refreshTmdbRatingForItem(item){
-  if(!item || !hasTmdbApiKey()) return null;
-  const result=await getCachedTmdbRating(item.tvdbId);
-  const lib=item.mediaType==='show'?state.showLibrary:state.library;
-  const current=lib.find(x=>x.id===item.id) || item;
-  const meta=current.tvdbMeta||{};
-  const voteAverage=result.rating ? result.rating.voteAverage : null;
-  const voteCount=result.rating ? result.rating.voteCount : null;
-  const changed=meta.tmdbVoteAverage!==voteAverage || meta.tmdbVoteCount!==voteCount || meta.tmdbRatingCheckedAt!==result.checkedAt || meta.score!==null;
-  if(changed){
-    current.tvdbMeta={...meta, score:null, tmdbVoteAverage:voteAverage, tmdbVoteCount:voteCount, tmdbRatingCheckedAt:result.checkedAt};
-    current.tmdbMeta=current.tvdbMeta;
-    await saveItem(current);
-  }
-  return result.rating;
 }
 
 /* ---------- Animation filter (TVDB genres) ---------- */
@@ -1454,12 +1352,6 @@ function updateSearchResults(){
   area.innerHTML=renderSearchResultsBody();
   area.querySelectorAll('[data-preview]').forEach(el=> el.addEventListener('click',()=> openPreview(Number(el.getAttribute('data-preview')))));
 }
-function tvdbScoreMarkup(meta){
-  if(!hasTmdbApiKey()) return '';
-  const score = meta && typeof meta.tmdbVoteAverage==='number' && Number.isFinite(meta.tmdbVoteAverage) && meta.tmdbVoteAverage>=0 && meta.tmdbVoteAverage<=10 ? meta.tmdbVoteAverage : null;
-  if(score==null) return '';
-  return `<div class="tvdb-score"><span class="tvdb-score-mark">TMDB</span><span>${Number(score).toFixed(1)}/10</span></div>`;
-}
 function tvdbGenresMarkup(meta){
   const g=meta&&Array.isArray(meta.genres)? meta.genres:[];
   if(!g.length) return '';
@@ -1495,23 +1387,23 @@ function renderDetail(){
   const seasons=a.seasons||[], total=seasons.reduce((n,x)=> n+(x.episodeCount||0),0);
   const seasonRows=seasons.map((x,i)=>renderSeasonRow(x,i)).join('')||`<div class="status-empty">No season data from TVDB.</div>`;
   const owned=state.previewMode? lib.find(x=> String(x.tvdbId)===String(a.tvdbId)) : null;
+  const tvdbStatusValue=a.tvdbMeta&&a.tvdbMeta.tvdbStatus?String(a.tvdbMeta.tvdbStatus).trim():'Unknown';
+  const tvdbStatusSignature=`<span class="tvdb-status-signature" title="TVDB status" aria-label="TVDB status: ${escapeHtml(tvdbStatusValue)}">TVDB status: ${escapeHtml(tvdbStatusValue)}</span>`;
   let actions='';
   if(state.previewMode && !owned) actions=`<div class="detail-actions"><button class="btn btn-accent btn-block" data-add-anime="1">Add to library</button></div>`;
   else if(state.previewMode && owned){const st=map[owned.status]||map.planned; actions=`<div class="detail-actions"><div class="status-pill status-${owned.status}"><span class="status-dot"></span>${st.label} ${st.emoji}</div><button class="btn btn-ghost btn-block" data-open-detail="${escapeHtml(owned.id)}">View in library</button></div>`;}
   else {const st=map[a.status]||map.planned; const rating=(a.rating&&RATING_MAP[a.rating])?RATING_MAP[a.rating]:null;
     actions=`<div class="detail-actions"><div class="detail-meta-row"><button class="status-pill status-${a.status}" type="button" data-change-status="1" aria-label="Change status, currently ${escapeHtml(st.label)}"><span class="status-dot"></span>${st.label} ${st.emoji}</button><button class="rating-pill" data-open-rating="1">Rating: <span class="rating-emoji">${rating? `${rating.emoji} ${escapeHtml(rating.label)}` : RATING_UNSET_EMOJI}</span></button></div></div>`;}
-  const score = tvdbScoreMarkup(a.tvdbMeta||a.tmdbMeta);
   const genres = tvdbGenresMarkup(a.tvdbMeta||a.tmdbMeta);
   const description = tvdbDescriptionMarkup(a.tvdbMeta||a.tmdbMeta);
-  const statusLine = (a.tvdbMeta&&a.tvdbMeta.tvdbStatus) ? `<div class="detail-tvdb-status">TVDB status: ${escapeHtml(a.tvdbMeta.tvdbStatus)}</div>` : '';
   const link = tvdbTitleLink(a);
   const refreshButton = tvdbRefreshButton(a);
   const tvdbTools = (link||refreshButton) ? `<div class="tvdb-detail-tools">${link}${refreshButton}</div>` : '';
   const del = !state.previewMode? `<div style="display:flex;justify-content:center;padding:6px 4px 10px;"><button class="btn btn-danger btn-sm" data-delete-anime="1">🗑️ Remove from library</button></div>` : '';
   const refresh = !state.previewMode? tvdbRefreshMarkup(a.tvdbMeta||a.tmdbMeta) : '';
   return `<div class="view-head"><button class="back-btn" data-go="${state.previewMode?'search':'home'}">← Back</button></div>
-    <div class="detail-hero"><h1 class="detail-title">${escapeHtml(a.title)}</h1><div class="detail-poster-wrap"><img class="detail-poster" src="${posterSrc(a.poster)}" alt=""></div>
-    <div class="detail-stats"><b>${seasons.length}</b>&nbsp;seasons&nbsp;&nbsp;·&nbsp;&nbsp;<b>${total}</b>&nbsp;episodes</div>${genres}${description}${score}${statusLine}</div>
+    <div class="detail-hero"><h1 class="detail-title">${escapeHtml(a.title)}</h1><div class="detail-poster-wrap"><img class="detail-poster" src="${posterSrc(a.poster)}" alt="">${tvdbStatusSignature}</div>
+    <div class="detail-stats"><b>${seasons.length}</b>&nbsp;seasons&nbsp;&nbsp;·&nbsp;&nbsp;<b>${total}</b>&nbsp;episodes</div>${genres}${description}</div>
     ${actions}<div class="section-label">Seasons</div><div id="season-list">${seasonRows}</div>${del}${refresh}${tvdbTools}`;
 }
 function renderSeasonRow(s, idx){
@@ -1544,11 +1436,6 @@ function renderSettings(){
     </div>
     <div class="row"><button class="btn btn-ghost btn-sm" id="save-tvdb-key-btn">Save TVDB key</button><button class="btn btn-ghost btn-sm" id="test-conn-btn">Test connection</button></div>
     <div id="test-status"></div>
-    <div class="field"><label class="field-label">TMDB API key <span style="font-weight:500;color:var(--muted);">(optional ratings)</span></label>
-      <input class="field-input" id="tmdb-key-input" type="password" placeholder="Paste your TMDB v3 API key" value="${escapeHtml(state.settings.tmdbApiKey)}">
-      <div class="field-help">Optional. Used only to show TMDB community ratings; metadata and episode data still come from TVDB. Stored locally, never uploaded.</div>
-    </div>
-    <div class="row"><button class="btn btn-ghost btn-sm" id="save-tmdb-key-btn">Save TMDB key</button></div>
     <div class="divider"></div>
     <div class="field"><label class="field-label">Appearance</label>
       <div class="theme-row"><button class="theme-opt ${state.settings.theme==='dark'?'active':''}" data-theme-choice="dark">🌙 Dark</button><button class="theme-opt ${state.settings.theme==='light'?'active':''}" data-theme-choice="light">☀️ Light</button></div>
@@ -1652,14 +1539,6 @@ async function openPreview(tvdbId){
     const tv=await getTvDetails(safe);
     const preview=normalizeLibraryItem(tv, state.activeTab==='anime'?'anime':'show');
     if(!preview) throw new Error('TVDB returned invalid data.');
-    if(hasTmdbApiKey()){
-      try{
-        const result=await getCachedTmdbRating(preview.tvdbId);
-        const rating=result.rating;
-        preview.tvdbMeta={...preview.tvdbMeta, score:null, tmdbVoteAverage:rating?rating.voteAverage:null, tmdbVoteCount:rating?rating.voteCount:null, tmdbRatingCheckedAt:result.checkedAt};
-        preview.tmdbMeta=preview.tvdbMeta;
-      }catch(e){ console.warn('TMDB preview rating failed for',preview.title,e); }
-    }
     state.previewTvdb=preview;
   }catch(err){ showToast(err.message||'Could not load details.'); state.view='search'; state.previewMode=false; render(); return; }
   state.detailLoading=false; render();
@@ -1684,11 +1563,6 @@ async function confirmAddWithStatus(statusKey){
   item.tmdbMeta=item.tvdbMeta;
   try{ await saveItem(item); }catch(e){ console.error(e); showToast('Could not save.'); return; }
   closeSheet(); showToast('Added to '+map[statusKey].label+'.'); openDetail(item.id);
-  if(hasTmdbApiKey() && navigator.onLine){
-    refreshTmdbRatingForItem(item).then(()=>{
-      if(state.view==='detail' && !state.previewMode && state.detailId===item.id) render();
-    }).catch(e=> console.warn('TMDB rating refresh failed for',item.title,e));
-  }
 }
 async function setAnimeStatus(statusKey){
   const a=activeLibrary().find(x=> x.id===state.detailId), map=activeStatusMap(); if(!a||!map[statusKey]) return;
@@ -1726,12 +1600,6 @@ async function saveTvdbKey(){
   await saveProfile({tvdbApiKey:key});
   tvdbToken=null;
   showToast('TVDB key saved.');
-}
-async function saveTmdbKey(){
-  const keyEl=document.getElementById('tmdb-key-input');
-  const key=keyEl?keyEl.value.trim():'';
-  await saveProfile({tmdbApiKey:key});
-  showToast('TMDB key saved.');
 }
 async function runTestConnection(){
   const box=document.getElementById('test-status');
@@ -1815,7 +1683,7 @@ async function importLibrary(file){
 async function clearAllData(){
   if(!confirm('Clear all data? This deletes your library, settings and notifications from this browser. Export first if you want a backup.')) return;
   const db=await getDB();
-  const stores=['anime','series','notifications','profile','animationCache','tmdbRatingCache'];
+  const stores=['anime','series','notifications','profile','animationCache'];
   await Promise.all(stores.map(s=> new Promise((res,rej)=>{ 
     try{
       const tx=db.transaction(s,'readwrite'); tx.objectStore(s).clear(); tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error);
@@ -1823,8 +1691,7 @@ async function clearAllData(){
   })));
   state.library=[]; state.showLibrary=[]; state.notifications=[];
   animationCache.clear();
-  tmdbRatingCache.clear();
-  state.settings={ tvdbApiKey:'', tvdbPin:'', tmdbApiKey:'', theme:'dark', accent:ACCENTS[0], displayName:'', photoURL:'', showLibraryRatings:false };
+  state.settings={ tvdbApiKey:'', tvdbPin:'', theme:'dark', accent:ACCENTS[0], displayName:'', photoURL:'', showLibraryRatings:false };
   tvdbToken=null; applyTheme(); showToast('Data cleared.'); render();
 }
 
@@ -1864,10 +1731,6 @@ async function refreshCurrentTitle(){
       overview:freshMeta.overview,
       genres:freshMeta.genres,
       tvdbRefreshedAt:Date.now(),
-      score:null,
-      tmdbVoteAverage:existingMeta.tmdbVoteAverage??null,
-      tmdbVoteCount:existingMeta.tmdbVoteCount??null,
-      tmdbRatingCheckedAt:existingMeta.tmdbRatingCheckedAt??null,
     };
     current.tmdbMeta=current.tvdbMeta;
     await saveItem(current);
@@ -1875,10 +1738,6 @@ async function refreshCurrentTitle(){
       const note={id:uid(),animeId:current.id,mediaType:current.mediaType||'anime',title: returned? freshTitle+' is returning!' : freshTitle+' — '+((ns-(prev.numberOfSeasons||0))>0? `New season (${ns} total)` : `${ne-(prev.numberOfEpisodes||0)} new episode${(ne-(prev.numberOfEpisodes||0))===1?'':'s'}`),createdAt:Date.now(),read:false,titleSeen:false};
       state.notifications.unshift(note);
       await saveNotification(note);
-    }
-    if(hasTmdbApiKey() && navigator.onLine){
-      try{ await refreshTmdbRatingForItem(current); }
-      catch(e){ console.warn('TMDB rating refresh failed for',current.title,e); }
     }
     showToast('Title updated from TVDB.');
   }catch(e){
@@ -1929,7 +1788,6 @@ function wireViewEvents(){
   const avatarInput=document.getElementById('avatar-file-input');
   if(changePicBtn&&avatarInput){ changePicBtn.addEventListener('click',()=> avatarInput.click()); avatarInput.addEventListener('change',()=>{ if(avatarInput.files[0]) onAvatarFileSelected(avatarInput.files[0]); avatarInput.value=''; }); }
   document.getElementById('save-tvdb-key-btn')?.addEventListener('click', saveTvdbKey);
-  document.getElementById('save-tmdb-key-btn')?.addEventListener('click', saveTmdbKey);
   document.getElementById('test-conn-btn')?.addEventListener('click', runTestConnection);
   main.querySelectorAll('[data-theme-choice]').forEach(el=> el.addEventListener('click',()=> setTheme(el.getAttribute('data-theme-choice'))));
   main.querySelectorAll('[data-accent]').forEach(el=> el.addEventListener('click',()=> setAccent(el.getAttribute('data-accent'))));
