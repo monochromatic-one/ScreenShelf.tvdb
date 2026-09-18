@@ -610,6 +610,27 @@ function seasonDisplayName(s, fallbackNumber){
   if(typeof s.name==='string' && s.name.trim() && !hasJapanese(s.name)) return s.name.trim();
   return 'Season '+fallbackNumber;
 }
+const seasonNameCache = new Map();
+const GENERIC_SEASON_NAME_RE = /^(?:season\s*\d+|aired\s+order|dvd\s+order|absolute\s+order|alternate(?:\s+dvd)?\s+order|regional\s+order|default\s+order)$/i;
+function seasonNeedsTranslation(s, fallbackNumber){
+  const name=seasonDisplayName(s,fallbackNumber);
+  return !name || GENERIC_SEASON_NAME_RE.test(name.trim());
+}
+async function fetchEnglishSeasonName(s){
+  const displayed=seasonDisplayName(s,s.number);
+  const fallback=GENERIC_SEASON_NAME_RE.test(displayed.trim()) ? 'Season '+s.number : displayed;
+  const seasonId=normalizeTvdbId(s&&s.id);
+  if(!seasonNeedsTranslation(s,s.number) || seasonId==null) return fallback;
+  if(seasonNameCache.has(seasonId)) return seasonNameCache.get(seasonId);
+  let name=fallback;
+  try{
+    const json=await tvdbFetch('/seasons/'+seasonId+'/translations/eng',{});
+    const candidate=json.data?.name;
+    if(typeof candidate==='string' && candidate.trim() && !hasJapanese(candidate) && !GENERIC_SEASON_NAME_RE.test(candidate.trim())) name=candidate.trim();
+  }catch(e){ console.warn('Season name lookup failed for',seasonId,e); }
+  seasonNameCache.set(seasonId,name);
+  return name;
+}
 
 /* ---------- Normalizers (local) ---------- */
 const MAX_PROFILE_PHOTO_LENGTH = 300000;
@@ -985,7 +1006,15 @@ async function getTvDetails(tvdbId){
   let seasonsRaw = Array.isArray(tv.seasons)
     ? tv.seasons.filter(s=> s.number!==0 && s.type && s.type.type==='official').sort((a,b)=> a.number-b.number)
     : [];
-  let seasons = seasonsRaw.map(s=> ({ seasonNumber:s.number, name: seasonDisplayName(s, s.number), episodeCount:0, _rawId:s.id }));
+  // The extended record often carries only "Aired Order"/"Season N" here.
+  // Resolve generic names through the per-season English translation endpoint,
+  // in small batches to avoid a burst of TVDB requests.
+  const seasonNames=[];
+  for(let i=0;i<seasonsRaw.length;i+=6){
+    const batch=seasonsRaw.slice(i,i+6);
+    seasonNames.push(...await Promise.all(batch.map(s=> fetchEnglishSeasonName(s))));
+  }
+  let seasons = seasonsRaw.map((s,i)=> ({ seasonNumber:s.number, name:seasonNames[i] || seasonDisplayName(s, s.number), episodeCount:0, _rawId:s.id }));
   // Episode counts — robust pagination (query ?page= vs path /default/{page}) + dedup
   try{
     const epCounts={};
