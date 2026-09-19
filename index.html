@@ -1429,6 +1429,10 @@ async function enrichAniListRelations(item){
 function normalizedSearchText(value){
   return String(value||'').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim();
 }
+function tvdbSearchPopularity(result){
+  const popularity=Number(result.searchScore);
+  return Number.isFinite(popularity)&&popularity>0?Math.log10(popularity+1):0;
+}
 function tvdbSearchRelevance(result,query){
   const q=normalizedSearchText(query);
   const title=normalizedSearchText(result.name);
@@ -1436,6 +1440,8 @@ function tvdbSearchRelevance(result,query){
   const qTokens=q.split(/\s+/).filter(Boolean);
   const titleTokens=title.split(/\s+/).filter(Boolean);
   let rank=0;
+  // Relevance remains the guard against unrelated popular titles, while the
+  // TVDB score now has a meaningful influence within each matching tier.
   if(title===q) rank+=1000000;
   else if(title.startsWith(q)) rank+=500000;
   else if(title.includes(q)) rank+=250000;
@@ -1443,18 +1449,17 @@ function tvdbSearchRelevance(result,query){
   else if(aliases.some(alias=>alias.includes(q))) rank+=70000;
   const matched=qTokens.filter(token=>titleTokens.some(word=>word===token||word.startsWith(token))).length;
   rank+=(matched/Math.max(1,qTokens.length))*50000;
-  const popularity=Number(result.searchScore);
-  if(Number.isFinite(popularity)&&popularity>0) rank+=Math.log10(popularity+1)*100;
+  rank+=tvdbSearchPopularity(result)*1000;
   rank-=Math.max(0,title.length-q.length)*.25;
   return rank;
 }
 function rankTvdbSearchResults(results,query){
-  return results.map((result,index)=>({...result,_sourceOrder:index,_relevance:tvdbSearchRelevance(result,query)}))
-    .sort((a,b)=> b._relevance-a._relevance || a._sourceOrder-b._sourceOrder)
-    .map(({_sourceOrder,_relevance,...result})=>result);
+  return results.map((result,index)=>({...result,_sourceOrder:index,_popularity:tvdbSearchPopularity(result),_relevance:tvdbSearchRelevance(result,query)}))
+    .sort((a,b)=> b._relevance-a._relevance || b._popularity-a._popularity || a._sourceOrder-b._sourceOrder)
+    .map(({_sourceOrder,_popularity,_relevance,...result})=>result);
 }
 async function searchTv(query){
-  const data = await tvdbFetch('/search', { query, type:'series', limit:'6' });
+  const data = await tvdbFetch('/search', { query, type:'series', limit:'20' });
   const raw = Array.isArray(data.data)? data.data: [];
   const mapped = raw.map(r=>{
     let numericId=null;
